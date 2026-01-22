@@ -11,8 +11,8 @@ async def root():
 async def health():
     return {"status": "healthy"}
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    print(f"Starting on port {port}")
-    uvicorn.run("main_simple:app", host="0.0.0.0", port=port)
+# Direct startup without if __name__ check
+import uvicorn
+port = int(os.environ.get("PORT", 8000))
+print(f"Starting on port {port}")
+uvicorn.run(app, host="0.0.0.0", port=port)

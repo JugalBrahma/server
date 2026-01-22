@@ -1,23 +1,24 @@
-fastapi
-uvicorn
-firebase-admin
-python-dotenv
-boto3
+fastapi>=0.104.0
+uvicorn>=0.24.0
+firebase-admin>=6.0.0
+python-dotenv>=1.0.0
+boto3>=1.28.0
 pypdf
 pandas
 ipython
-langchain
+langchain>=0.1.0
 langchain-community
-langchain-google-genai
-langchain-pinecone
-langgraph
-pinecone-client
+langchain-google-genai>=1.0.0
+langchain-pinecone>=0.1.0
+langgraph>=0.2.0
+pinecone-client>=2.2.0
 google-genai
-pydantic
-python-multipart
-unstructured[pdf]
+pydantic>=2.0.0
+python-multipart>=0.0.6
+unstructured[pdf]>=0.12.0
 libmagic
 python-magic-bin; platform_system=="Windows"
 python-magic; platform_system!="Windows"
 pikepdf
 pdf2image
+pillow>=10.0.0

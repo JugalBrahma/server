@@ -4,16 +4,13 @@ from pathlib import Path
 from firebase_admin import credentials, firestore
 import firebase_admin
 
-# Add parent directory to path for firebase-adminsdk.json
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
 # -------------------------------
 # 🔐 Firebase Initialization (ONCE)
 # -------------------------------
 if not firebase_admin._apps:
-    cred = credentials.Certificate(
-        r"C:\Flutter Projects\1-Flutter Projects\ProductionReady\Ragtest\backendtest\server\firebase-adminsdk.json"
-    )
+    # For Railway deployment, use environment variable or default path
+    firebase_sdk_path = os.getenv("FIREBASE_ADMIN_SDK_PATH", "firebase-adminsdk.json")
+    cred = credentials.Certificate(firebase_sdk_path)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()

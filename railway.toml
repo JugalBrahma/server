@@ -1,5 +1,6 @@
 [build]
 builder = "NIXPACKS"
+buildTimeout = 600
 
 [deploy]
 healthcheckPath = "/"
@@ -9,6 +10,7 @@ restartPolicyMaxRetries = 10
 
 [[services]]
 name = "web"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
 
 [services.variables]
 PORT = "8000"

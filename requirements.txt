@@ -1,0 +1,23 @@
+fastapi
+uvicorn
+firebase-admin
+python-dotenv
+boto3
+pypdf
+pandas
+ipython
+langchain
+langchain-community
+langchain-google-genai
+langchain-pinecone
+langgraph
+pinecone-client
+google-genai
+pydantic
+python-multipart
+unstructured[pdf]
+libmagic
+python-magic-bin; platform_system=="Windows"
+python-magic; platform_system!="Windows"
+pikepdf
+pdf2image

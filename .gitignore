@@ -1,0 +1,43 @@
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Key files
+*.key
+*.pem
+*.p12
+*.pfx
+private_key*
+secret_key*
+api_key*
+config_key*
+
+# Firebase service account keys
+firebase-adminsdk.json
+firebase-credentials.json
+google-credentials.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db

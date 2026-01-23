@@ -1,0 +1,15 @@
+runtime: python311
+
+instance_class: F2
+
+env_variables:
+  PORT: 8080
+
+automatic_scaling:
+  min_instances: 0
+  max_instances: 2
+
+resources:
+  cpu: 1
+  memory_gb: 2
+  disk_size_gb: 10

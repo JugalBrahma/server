@@ -28,7 +28,7 @@ def include_router_safe(module_path: str, router_name: str = "router", prefix: s
         logging.exception("Failed to load router %s: %s", module_path, exc)
 
 include_router_safe("routes.folders", prefix="/api")
-include_router_safe("routes.upload")
+# include_router_safe("routes.upload")  # Temporarily disabled
 include_router_safe("routes.delete_pdf")
 include_router_safe("routes.agent_fixed")
 include_router_safe("routes.analytics", prefix="/api")

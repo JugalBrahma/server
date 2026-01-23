@@ -98,7 +98,7 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
                     if len(chunk.strip()) > 10:
                         text_chunks.append({
                             "type": "Text",
-                            "content": chunk,
+                            "content": chunk.lower(),  # Convert to lowercase
                             "metadata": {
                                 "page": element.get("page", 1),
                                 "chunk_index": i

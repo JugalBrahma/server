@@ -42,8 +42,8 @@ async def agent(
         # 3️⃣ Initialize agent with folder-specific namespace
         rag_agent = RAGAgent(namespace=namespace)
         
-        # 4️⃣ Query agent
-        ai = rag_agent.query(query.query)
+        # 4️⃣ Query agent (convert user query to lowercase)
+        ai = rag_agent.query(query.query.lower())
         print(f"Agent response from namespace {namespace}: {ai}")
         return {"response": ai, "namespace": namespace}
     except HTTPException as he:

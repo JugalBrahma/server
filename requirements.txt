@@ -16,4 +16,4 @@ pillow>=10.0.0
 # PDF processing without unstructured
 pypdf>=3.17.0
 pdfplumber>=0.10.0
-unstructured[all-docs]
+unstructured[all-docs]=0.11.6

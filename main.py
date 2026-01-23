@@ -27,16 +27,20 @@ def include_router_safe(module_path: str, router_name: str = "router", prefix: s
     except Exception as exc:
         logging.exception("Failed to load router %s: %s", module_path, exc)
 
-include_router_safe("routes.folders", prefix="/api")
+# include_router_safe("routes.folders", prefix="/api")
 # include_router_safe("routes.upload")  # Temporarily disabled
-include_router_safe("routes.delete_pdf")
-include_router_safe("routes.agent_fixed")
-include_router_safe("routes.analytics", prefix="/api")
-include_router_safe("routes.debug_pdf", prefix="/debug")
+# include_router_safe("routes.delete_pdf")
+# include_router_safe("routes.agent_fixed")
+# include_router_safe("routes.analytics", prefix="/api")
+# include_router_safe("routes.debug_pdf", prefix="/debug")
 
 @app.get("/")
 async def root():
     return {"message": "RAG Backend API is running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn, os

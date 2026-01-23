@@ -174,10 +174,13 @@ def create_agent(config: AgentConfig):
             Retrieved Documents:
             {tool_results}
             
+            IMPORTANT: When using information from documents in your answer, wrap the exact document text/phrases with <doc> and </doc> tags.
+            Example: "According to the document, <doc>The revenue increased by 25%</doc> in Q3."
+            
             Please provide a helpful answer based on these documents. If the documents don't contain relevant information, say so politely.
             """
             
-            final_response = config.llm.invoke([SystemMessage(content="You are a helpful assistant that answers questions based on retrieved documents."), 
+            final_response = config.llm.invoke([SystemMessage(content="You are a helpful assistant that answers questions based on retrieved documents. Always wrap document-sourced information with <doc> and </doc> tags."), 
                                                HumanMessage(content=final_prompt)])
             
             return {"messages": [final_response]}

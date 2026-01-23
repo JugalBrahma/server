@@ -42,6 +42,10 @@ async def root():
 async def health():
     return {"status": "ok"}
 
+@app.post("/agent")
+async def simple_agent(query: dict):
+    return {"response": f"Test response for: {query.get('query', 'no query')}", "status": "test_mode"}
+
 if __name__ == "__main__":
     import uvicorn, os
     port = int(os.environ.get("PORT", 8000))

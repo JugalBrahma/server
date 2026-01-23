@@ -6,11 +6,10 @@ boto3
 pydantic
 python-multipart
 langchain
+langchain_community
 langchain-google-genai
 langchain-pinecone
 langgraph
 pinecone-client
 unstructured[pdf]==0.11.6
-paddlepaddle
-unstructured-inference
 pillow

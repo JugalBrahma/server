@@ -11,5 +11,6 @@ langchain-google-genai
 langchain-pinecone
 langgraph
 pinecone-client
+pinecone-text
 unstructured[pdf]==0.11.6
 pillow

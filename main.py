@@ -1,11 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes.upload import router as upload_router
-from routes.debug_pdf import router as debug_router
-from routes.delete_pdf import router as delete_router
-from routes.folders import router as folders_router
-from routes.agent_fixed import router as agent_router
-from routes.analytics import router as analytics_router
+import importlib
+import logging
 
 app = FastAPI(title="RAG Backend API")
 
@@ -17,12 +13,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(folders_router, prefix="/api")
-app.include_router(upload_router)
-app.include_router(delete_router)
-app.include_router(agent_router)
-app.include_router(analytics_router, prefix="/api")
-app.include_router(debug_router, prefix="/debug")
+logging.basicConfig(level=logging.INFO)
+
+def include_router_safe(module_path: str, router_name: str = "router", prefix: str | None = None) -> None:
+    try:
+        module = importlib.import_module(module_path)
+        router = getattr(module, router_name)
+        if prefix:
+            app.include_router(router, prefix=prefix)
+        else:
+            app.include_router(router)
+        logging.info("Loaded router: %s", module_path)
+    except Exception as exc:
+        logging.exception("Failed to load router %s: %s", module_path, exc)
+
+include_router_safe("routes.folders", prefix="/api")
+include_router_safe("routes.upload")
+include_router_safe("routes.delete_pdf")
+include_router_safe("routes.agent_fixed")
+include_router_safe("routes.analytics", prefix="/api")
+include_router_safe("routes.debug_pdf", prefix="/debug")
 
 @app.get("/")
 async def root():

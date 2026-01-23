@@ -53,15 +53,10 @@ async def delete_pdf(
 
     # 🆕 5️⃣ Delete from Pinecone vector store
     try:
-        # Create namespace for this FOLDER (separate memory per folder)
-        if folder_id:
-            # Use folder-specific namespace for folder isolation
-            namespace = f"user_{user_id}_folder_{folder_id}"
-        else:
-            # Fallback to user-wide namespace if no folder specified
-            namespace = f"user_{user_id}"
+        # Use single namespace per user (matches upload behavior)
+        namespace = f"user_{user_id}"
         
-        # Initialize RAG agent with folder-specific namespace
+        # Initialize RAG agent with user namespace
         rag_agent = RAGAgent(namespace=namespace)
         
         # Get Pinecone index directly

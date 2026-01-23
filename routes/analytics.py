@@ -36,20 +36,6 @@ async def get_folder_analytics(
         mcq_count = 0
         doc_retrieval_count = 0
         
-        # Document indicators that show data was retrieved
-        doc_indicators = [
-            'according to the documents',
-            'based on the provided',
-            'as mentioned in the',
-            'the documents state',
-            'according to file',
-            'in the document',
-            'the provided documents',
-            'based on the uploaded',
-            'as per the documents',
-            'the files mention',
-        ]
-        
         # Count metrics
         for message in messages:
             data = message.to_dict()
@@ -70,11 +56,10 @@ async def get_folder_analytics(
             elif not is_user and has_mcqs:
                 print(f"  -> Has MCQs but mcqIsTrue is false!")
             
-            # Check if response contains document references
+            # Count document references based on stored fields
             if not is_user:
-                text = data.get('text', '').lower()
-                if any(indicator in text for indicator in doc_indicators):
-                    doc_retrieval_count += 1
+                if data.get('from_documents') is True:
+                    doc_retrieval_count += int(data.get('doc_reference_count', 0)) or 1
         
         return {
             "folder_id": folder_id,

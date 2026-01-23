@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from agent.agent import RAGAgent
 from config.firebase import get_current_user_id
 import json
+import re
 
 class Query(BaseModel):
     query: str
@@ -40,7 +41,20 @@ async def agent(
         # 4️⃣ Query agent (convert user query to lowercase)
         ai = rag_agent.query(query.query.lower())
         print(f"Agent response from namespace {namespace}: {ai}")
-        return {"response": ai, "namespace": namespace}
+        
+        # Check if the response contains document markers and count them
+        response_text = ai.get("answer", "")
+        has_documents = "<doc>" in response_text and "</doc>" in response_text
+        
+        # Count document references
+        doc_count = len(re.findall(r'<doc>.*?</doc>', response_text))
+        
+        return {
+            "response": ai, 
+            "namespace": namespace,
+            "from_documents": has_documents,
+            "doc_reference_count": doc_count
+        }
     except HTTPException as he:
         raise he
     except Exception as e:

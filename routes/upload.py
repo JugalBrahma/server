@@ -105,9 +105,11 @@ async def upload_pdf(
                     # VECTORIZE AND STORE IN PINECONE
                     print(f"Vectorizing {len(text_chunks)} text chunks...")
                     try:
-                        # Create single namespace per user (not per folder)
-                        # Use user ID or email as namespace
-                        namespace = f"user_{user_id}"
+                        # Create namespace per folder (separate embeddings per folder)
+                        if folder_id:
+                            namespace = f"user_{user_id}_folder_{folder_id}"
+                        else:
+                            namespace = f"user_{user_id}"
                         
                         # Initialize RAG agent with folder-specific namespace
                         rag_agent = RAGAgent(namespace=namespace)

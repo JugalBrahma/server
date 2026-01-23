@@ -180,7 +180,8 @@ def create_agent(config: AgentConfig):
             1. Base your answer ENTIRELY on the retrieved documents
             2. For all facts, figures, and specific information from documents, wrap the exact text with <doc> and </doc> tags
             3. Example: "According to the document, <doc>The revenue increased by 25%</doc> in Q3."
-            4. If the documents don't contain the answer, say "I couldn't find this information in your documents."
+            4. Use correct spellings and match exact wording from the documents when quoting or referencing them.
+            5. If the documents don't contain the answer, say "I couldn't find this information in your documents."
             
             Answer:
             """

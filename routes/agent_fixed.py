@@ -29,15 +29,10 @@ async def agent(
         # DEBUG: Log the received folder_id
         print(f"DEBUG: folder_id='{query.folder_id}', type={type(query.folder_id)}")
         
-        # 2️⃣ Create namespace for this FOLDER (separate memory per folder)
-        if query.folder_id:
-            # Use folder-specific namespace for folder isolation
-            namespace = f"user_{user_id}_folder_{query.folder_id}"
-            print(f"DEBUG: Using folder namespace: {namespace}")
-        else:
-            # Fallback to user-wide namespace if no folder specified
-            namespace = f"user_{user_id}"
-            print(f"DEBUG: Using user namespace: {namespace}")
+        # 2️⃣ Create single namespace per user (not per folder)
+        # Use user ID or email as namespace
+        namespace = f"user_{user_id}"
+        print(f"DEBUG: Using user namespace: {namespace}")
         
         # 3️⃣ Initialize agent with folder-specific namespace
         rag_agent = RAGAgent(namespace=namespace)

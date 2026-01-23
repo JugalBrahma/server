@@ -169,18 +169,23 @@ def create_agent(config: AgentConfig):
             print(f"DEBUG: Retrieved documents content: {tool_results[:500]}...")
             
             final_prompt = f"""
-            Based on the retrieved documents, please answer the user's question: "{user_input}"
+            You MUST answer based ONLY on the retrieved documents below. Do not use any outside knowledge.
+            
+            User Question: "{user_input}"
             
             Retrieved Documents:
             {tool_results}
             
-            IMPORTANT: When using information from documents in your answer, wrap the exact document text/phrases with <doc> and </doc> tags.
-            Example: "According to the document, <doc>The revenue increased by 25%</doc> in Q3."
+            INSTRUCTIONS:
+            1. Base your answer ENTIRELY on the retrieved documents
+            2. For all facts, figures, and specific information from documents, wrap the exact text with <doc> and </doc> tags
+            3. Example: "According to the document, <doc>The revenue increased by 25%</doc> in Q3."
+            4. If the documents don't contain the answer, say "I couldn't find this information in your documents."
             
-            Please provide a helpful answer based on these documents. If the documents don't contain relevant information, say so politely.
+            Answer:
             """
             
-            final_response = config.llm.invoke([SystemMessage(content="You are a helpful assistant that answers questions based on retrieved documents. Always wrap document-sourced information with <doc> and </doc> tags."), 
+            final_response = config.llm.invoke([SystemMessage(content="You answer questions based ONLY on retrieved documents. Always wrap document information with <doc> and </doc> tags."), 
                                                HumanMessage(content=final_prompt)])
             
             return {"messages": [final_response]}
@@ -240,25 +245,17 @@ class RAGAgent:
         self.config = AgentConfig(index_name, namespace)
         self.graph = create_agent(self.config)
         
-        # Extract user_id and folder_id from namespace for conversation management
-        # Namespace format: "user_{user_id}_folder_{folder_id}" or "user_{user_id}"
+        # Extract user_id from namespace for conversation management
+        # Namespace format: "user_{user_id}"
         namespace_parts = namespace.split("_")
-        if "folder" in namespace_parts and "user" in namespace_parts:
-            # Folder-specific namespace: user_{user_id}_folder_{folder_id}
-            user_marker_idx = namespace_parts.index("user")
-            folder_marker_idx = namespace_parts.index("folder")
-            user_parts = namespace_parts[user_marker_idx + 1:folder_marker_idx]
-            folder_parts = namespace_parts[folder_marker_idx + 1:]
-            self.user_id = "_".join(user_parts) if user_parts else "unknown"
-            self.folder_id = "_".join(folder_parts) if folder_parts else None
-        elif len(namespace_parts) > 1 and namespace_parts[0] == "user":
+        if len(namespace_parts) > 1 and namespace_parts[0] == "user":
             # User-wide namespace: user_{user_id}
             self.user_id = "_".join(namespace_parts[1:])
-            self.folder_id = None
         else:
             self.user_id = "unknown"
-            self.folder_id = None
         
+        # No folder_id anymore since we use single namespace per user
+        self.folder_id = None
         self.conversation_manager = FirestoreConversationManager(self.user_id, self.folder_id)
     
     def query(self, user_input: str) -> dict:

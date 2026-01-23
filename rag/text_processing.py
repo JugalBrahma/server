@@ -56,76 +56,71 @@ def extract_pdf_elements(pdf_path: str) -> List[Any]:
 
 def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict], List[Dict]]:
     """
-    Process elements intelligently:
-    - Use text extraction for tables when available
-    - Only process meaningful images
+    Process elements intelligently from PyMuPDF extraction:
+    - Extract text and images
     - Filter out decorative elements
     """
-    from .image_processing import is_meaningful_image
-    
     text_chunks = []
     image_chunks = []
-
+    
+    # Initialize text splitter
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", ". ", " ", ""],
+        length_function=len
+    )
+    
     for element in raw_elements:
-        element_type = element.__class__.__name__
+        if not isinstance(element, dict):
+            continue
+            
+        element_type = element.get("type", "")
         
         try:
-            # ---------- TABLE ----------
-            if element_type == "Table":
-                # Tables already extracted as text by unstructured
-                # Only use vision if text extraction failed
-                if element.text and len(element.text.strip()) > 50:
-                    metadata_dict = element.metadata.to_dict() if hasattr(element.metadata, 'to_dict') else {}
-                    text_chunks.append({
-                        "type": "Table",
-                        "content": element.text,
-                        "metadata": metadata_dict
-                    })
-                else:
-                    # Vision fallback for complex tables
-                    image_base64 = getattr(element.metadata, "image_base64", None)
-                    if image_base64:
-                        metadata_dict = element.metadata.to_dict() if hasattr(element.metadata, 'to_dict') else {}
-                        image_chunks.append({
-                            "type": "Table",
-                            "base64": image_base64,
-                            "metadata": metadata_dict
-                        })
-
-            # ---------- IMAGE ----------
-            elif element_type == "Image":
-                # Only process meaningful images
-                if is_meaningful_image(element):
-                    image_base64 = getattr(element.metadata, "image_base64", None)
-                    if image_base64:
-                        metadata_dict = element.metadata.to_dict() if hasattr(element.metadata, 'to_dict') else {}
-                        image_chunks.append({
-                            "type": "Image",
-                            "base64": image_base64,
-                            "metadata": metadata_dict
-                        })
-
             # ---------- TEXT ----------
-            else:
-                if hasattr(element, "text") and element.text.strip():
-                    content = element.text.strip()
-                    if content.isdigit() and len(content) <= 4:
-                        continue
-
-                    has_alpha = any(ch.isalpha() for ch in content)
-                    if not has_alpha and len(content) < 15:
-                        continue
-
-                    metadata_dict = element.metadata.to_dict() if hasattr(element.metadata, 'to_dict') else {}
-                    text_chunks.append({
-                        "type": element_type,
-                        "content": content,
-                        "metadata": metadata_dict
+            if element_type == "text":
+                text = element.get("text", "").strip()
+                if not text:
+                    continue
+                    
+                # Filter out meaningless text
+                if text.isdigit() and len(text) <= 4:
+                    continue
+                    
+                has_alpha = any(ch.isalpha() for ch in text)
+                if not has_alpha and len(text) < 15:
+                    continue
+                
+                # Split text into chunks
+                chunks = splitter.split_text(text)
+                for i, chunk in enumerate(chunks):
+                    if len(chunk.strip()) > 10:
+                        text_chunks.append({
+                            "type": "Text",
+                            "content": chunk,
+                            "metadata": {
+                                "page": element.get("page", 1),
+                                "chunk_index": i
+                            }
+                        })
+            
+            # ---------- IMAGE ----------
+            elif element_type == "image":
+                image_path = element.get("image_path", "")
+                if image_path and os.path.exists(image_path):
+                    # For now, just add a reference to the image
+                    # You could add image processing here if needed
+                    image_chunks.append({
+                        "type": "Image",
+                        "image_path": image_path,
+                        "metadata": {
+                            "page": element.get("page", 1)
+                        }
                     })
         
         except Exception as e:
             print(f"❌ Error processing element {element_type}: {e}")
-            # Skip problematic element but continue processing
             continue
 
     return text_chunks, image_chunks

@@ -5,32 +5,53 @@ Text Processing Functions for RAG Pipeline
 - Content cleaning and optimization
 """
 
-from unstructured.partition.pdf import partition_pdf
+import os
+import fitz  # PyMuPDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import List, Dict, Any, Tuple, Optional
 
 def extract_pdf_elements(pdf_path: str) -> List[Any]:
-    """Extract all elements from PDF including images and tables."""
+    """Extract all elements from PDF including images and tables using PyMuPDF."""
     try:
-        raw_pdf_elements = partition_pdf(
-            filename=pdf_path,
-            strategy="hi_res",
-            extract_images_in_pdf=True,
-            extract_image_block_types=["Image", "Table"],
-            extract_image_block_to_payload=True,
-            skip_infer_table_structure=False,
-            model_name="yolox"
-        )
-        return raw_pdf_elements
+        doc = fitz.open(pdf_path)
+        extracted_elements: List[Dict[str, Any]] = []
+        images_dir = f"{pdf_path}_images"
+        os.makedirs(images_dir, exist_ok=True)
+
+        for page_index in range(len(doc)):
+            page = doc[page_index]
+            text = page.get_text("text")
+            if text.strip():
+                extracted_elements.append({
+                    "type": "text",
+                    "page": page_index + 1,
+                    "text": text,
+                })
+
+            images = page.get_images(full=True)
+            for img_index, img in enumerate(images):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                img_bytes = base_image.get("image")
+                ext = base_image.get("ext", "png")
+                if not img_bytes:
+                    continue
+                image_filename = f"page{page_index + 1}_img{img_index + 1}.{ext}"
+                image_path = os.path.join(images_dir, image_filename)
+                with open(image_path, "wb") as image_file:
+                    image_file.write(img_bytes)
+
+                extracted_elements.append({
+                    "type": "image",
+                    "page": page_index + 1,
+                    "image_path": image_path,
+                })
+
+        doc.close()
+        return extracted_elements
     except Exception as e:
-        print(f"❌ Unstructured partition failed: {e}")
-        # Fallback to simple extraction if hi_res fails
-        try:
-            raw_pdf_elements = partition_pdf(filename=pdf_path, strategy="fast")
-            return raw_pdf_elements
-        except Exception as fallback_err:
-            print(f"❌ Fallback partition also failed: {fallback_err}")
-            return []
+        print(f"❌ PyMuPDF extraction failed: {e}")
+        return []
 
 
 def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict], List[Dict]]:

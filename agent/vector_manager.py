@@ -24,7 +24,7 @@ logging.getLogger("google").setLevel(logging.WARNING)
 class VectorSearchManager:
     """Manages vector database operations and document retrieval"""
     
-    def __init__(self, index_name: str = "askadocument", namespace: str = "test-2"):
+    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
         """
         Initialize Vector Search Manager
         
@@ -155,22 +155,38 @@ class VectorSearchManager:
             print(f"⚠️ Hybrid retriever initialization failed: {e}. Falling back to dense search.")
             return None
 
-    def _update_bm25_encoder(self, texts: List[str]):
+    def _update_bm25_encoder(self, texts: List[str], s3_key: Optional[str] = None):
         """Update BM25 encoder with new texts and persist state"""
         if not texts or not self.hybrid_enabled:
             return
 
         corpus: List[str] = []
+        mapping: Dict[str, str] = {}
         if self.bm25_corpus_path and self.bm25_corpus_path.exists():
             try:
                 corpus = json.loads(self.bm25_corpus_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 print("⚠️ BM25 corpus file corrupted, resetting it.")
                 corpus = []
+        
+        mapping_path = self.bm25_storage_dir / f"{self.namespace.replace('/', '_')}_mapping.json"
+        if mapping_path.exists():
+            try:
+                mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                print("⚠️ BM25 mapping file corrupted, resetting it.")
+                mapping = {}
 
+        start_idx = len(corpus)
         corpus.extend(texts)
+        
+        # Update mapping for new texts
+        for i, text in enumerate(texts):
+            mapping[str(start_idx + i)] = s3_key or "unknown"
+        
         if self.bm25_corpus_path:
             self.bm25_corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
+        mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
 
         try:
             encoder = BM25Encoder().default()
@@ -326,7 +342,7 @@ class VectorSearchManager:
             print(f"📝 Processing {len(texts)} text chunks with {len(metadatas)} metadata entries")
             print(f"🧹 Cleaned metadata sample: {metadatas[0] if metadatas else 'None'}")
             
-            self._update_bm25_encoder(texts)
+            self._update_bm25_encoder(texts, s3_key)
 
             if self.hybrid_enabled and self.retriever:
                 result = self.retriever.add_texts(texts=texts, metadatas=metadatas, namespace=self.namespace)
@@ -364,6 +380,58 @@ class VectorSearchManager:
             return True
         except Exception as e:
             print(f"❌ Failed to delete documents: {e}")
+            return False
+    
+    def delete_documents_by_s3_key(self, s3_key: str) -> bool:
+        """
+        Delete vectors from Pinecone and remove corresponding texts from BM25 state
+        for a specific PDF (identified by s3_key).
+        """
+        try:
+            # 1) Delete vectors from Pinecone
+            delete_result = self.index.delete(
+                filter={"s3_key": s3_key},
+                namespace=self.namespace
+            )
+            print(f"🗑️ Deleted vectors from Pinecone: {delete_result}")
+
+            # 2) Update BM25 corpus (if hybrid enabled)
+            if self.hybrid_enabled and self.bm25_corpus_path and self.bm25_corpus_path.exists():
+                # Load corpus and mapping
+                corpus = json.loads(self.bm25_corpus_path.read_text(encoding="utf-8"))
+                mapping_path = self.bm25_storage_dir / f"{self.namespace.replace('/', '_')}_mapping.json"
+                
+                if mapping_path.exists():
+                    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+                else:
+                    print("⚠️ No mapping file found — cannot update BM25 corpus precisely")
+                    return False
+
+                # Filter out texts belonging to this PDF
+                new_corpus = []
+                new_mapping = {}
+                new_idx = 0
+
+                for idx, text in enumerate(corpus):
+                    if mapping.get(str(idx)) != s3_key:
+                        new_corpus.append(text)
+                        new_mapping[str(new_idx)] = mapping.get(str(idx))
+                        new_idx += 1
+
+                # Re-fit BM25 and save updated state
+                self.bm25_encoder = BM25Encoder().default()
+                self.bm25_encoder.fit(new_corpus)
+                self.bm25_encoder.dump(str(self.bm25_state_path))
+                self.bm25_corpus_path.write_text(json.dumps(new_corpus), encoding="utf-8")
+                mapping_path.write_text(json.dumps(new_mapping), encoding="utf-8")
+
+                # Re-initialize retriever with updated BM25
+                self.retriever = self._init_hybrid_retriever()
+                print(f"✅ Updated BM25 state after deleting {s3_key}")
+
+            return True
+        except Exception as e:
+            print(f"❌ Failed to delete documents for {s3_key}: {e}")
             return False
     
     def get_stats(self) -> Dict[str, Any]:

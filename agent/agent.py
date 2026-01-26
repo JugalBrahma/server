@@ -36,7 +36,7 @@ class State(TypedDict):
 
 # ==================== AGENT CONFIGURATION ====================
 class AgentConfig:
-    def __init__(self, index_name: str = "askadocument", namespace: str = "test-2"):
+    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
         # Initialize LLM Manager
         self.llm_manager = LLMManager(model_name="gemini-2.5-flash")  # Updated to 2.0 flash lite
         self.llm = self.llm_manager.get_llm()
@@ -242,7 +242,7 @@ def create_agent(config: AgentConfig):
 class RAGAgent:
     """Main RAG Agent class with Firestore conversation persistence"""
     
-    def __init__(self, index_name: str = "askadocument", namespace: str = "test-2"):
+    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
         self.config = AgentConfig(index_name, namespace)
         self.graph = create_agent(self.config)
         

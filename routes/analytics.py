@@ -39,6 +39,8 @@ async def get_folder_analytics(
         # Count metrics
         for message in messages:
             data = message.to_dict()
+            if data.get("role") == "error":
+                continue
             total_messages += 1
             
             # Debug logging

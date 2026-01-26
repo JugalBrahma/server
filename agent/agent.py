@@ -38,7 +38,7 @@ class State(TypedDict):
 class AgentConfig:
     def __init__(self, index_name: str = "askadocument", namespace: str = "test-2"):
         # Initialize LLM Manager
-        self.llm_manager = LLMManager(model_name="gemini-2.0-flash-lite")  # Updated to 2.0 flash lite
+        self.llm_manager = LLMManager(model_name="gemini-2.5-flash")  # Updated to 2.0 flash lite
         self.llm = self.llm_manager.get_llm()
         
         # Initialize Vector Search Manager
@@ -275,6 +275,12 @@ class RAGAgent:
             response_content = final_message.content
         else:
             response_content = str(final_message)
+
+        if isinstance(response_content, list):
+            response_content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in response_content
+            )
 
         # Detect MCQs using structured output
         mcqs: List[MCQ] = []

@@ -117,6 +117,7 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
                         print(f"❌ Could not read image {image_path}: {img_err}")
                         continue
 
+                    print(f"🖼️ Extracted image from page {element.get('page', 1)} -> {image_path}")
                     image_chunks.append({
                         "type": "Image",
                         "image_path": image_path,
@@ -125,6 +126,7 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
                             "page": element.get("page", 1)
                         }
                     })
+                    print(f"   ↳ Image chunk #{len(image_chunks)} ready (size: {len(image_base64)} base64 chars)")
         
         except Exception as e:
             print(f"❌ Error processing element {element_type}: {e}")

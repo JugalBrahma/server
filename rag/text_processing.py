@@ -7,6 +7,7 @@ Text Processing Functions for RAG Pipeline
 
 import os
 import base64
+from collections import defaultdict
 import fitz  # PyMuPDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import List, Dict, Any, Tuple, Optional
@@ -97,12 +98,15 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
                 chunks = splitter.split_text(text)
                 for i, chunk in enumerate(chunks):
                     if len(chunk.strip()) > 10:
+                        page = element.get("page", 1)
+                        element_id = f"text_{page}_{i}"
                         text_chunks.append({
                             "type": "Text",
                             "content": chunk.lower(),  # Convert to lowercase
                             "metadata": {
-                                "page": element.get("page", 1),
-                                "chunk_index": i
+                                "page": page,
+                                "chunk_index": i,
+                                "element_id": element_id
                             }
                         })
             
@@ -140,19 +144,46 @@ def combine_text_and_images(text_chunks: List[Dict], image_descriptions: List[Di
     Link images to their parent text using parent_id metadata.
     Preserves context better than proximity-based methods.
     """
-    # Create lookup map
-    text_map = {c['metadata'].get('element_id'): c for c in text_chunks if c.get('metadata') and c['metadata'].get('element_id')}
+    # Create lookup maps
+    text_map = {}
+    page_text_map: Dict[int, List[Dict]] = defaultdict(list)
+    for chunk in text_chunks:
+        metadata = chunk.get('metadata', {})
+        element_id = metadata.get('element_id')
+        page = metadata.get('page')
+        if element_id:
+            text_map[element_id] = chunk
+        if page is not None:
+            page_text_map[page].append(chunk)
+
+    # Ensure deterministic order when assigning by page
+    for page in page_text_map:
+        page_text_map[page].sort(key=lambda c: c.get('metadata', {}).get('chunk_index', 0))
+
+    page_assignment_counts = defaultdict(int)
     combined_chunks = []
     processed_image_indices = set()
 
     # Attach images to their direct parents
     for idx, img in enumerate(image_descriptions):
         parent_id = img['metadata'].get('parent_id') if img.get('metadata') else None
+        target_chunk = None
+
         if parent_id and parent_id in text_map:
-            parent_text = text_map[parent_id]
-            parent_text['content'] += f"\n\n[Image Context]: {img['content']}"
-            parent_text['has_image'] = True
+            target_chunk = text_map[parent_id]
+        else:
+            page = img.get('metadata', {}).get('page') if img.get('metadata') else None
+            if page in page_text_map and page_text_map[page]:
+                assign_idx = page_assignment_counts[page] % len(page_text_map[page])
+                page_assignment_counts[page] += 1
+                target_chunk = page_text_map[page][assign_idx]
+
+        if target_chunk:
+            target_chunk['content'] += f"\n\n[Image Context]: {img['content']}"
+            target_chunk['has_image'] = True
             processed_image_indices.add(idx)
+        else:
+            print(f"⚠️ Could not find text chunk for image description idx={idx} - leaving as image-only chunk")
 
     # Handle orphan images
     for idx, img in enumerate(image_descriptions):

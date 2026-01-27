@@ -6,6 +6,7 @@ Text Processing Functions for RAG Pipeline
 """
 
 import os
+import base64
 import fitz  # PyMuPDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import List, Dict, Any, Tuple, Optional
@@ -109,11 +110,17 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
             elif element_type == "image":
                 image_path = element.get("image_path", "")
                 if image_path and os.path.exists(image_path):
-                    # For now, just add a reference to the image
-                    # You could add image processing here if needed
+                    try:
+                        with open(image_path, "rb") as img_file:
+                            image_base64 = base64.b64encode(img_file.read()).decode("utf-8")
+                    except Exception as img_err:
+                        print(f"❌ Could not read image {image_path}: {img_err}")
+                        continue
+
                     image_chunks.append({
                         "type": "Image",
                         "image_path": image_path,
+                        "base64": image_base64,
                         "metadata": {
                             "page": element.get("page", 1)
                         }

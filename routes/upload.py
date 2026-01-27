@@ -6,7 +6,19 @@ from datetime import datetime
 from config.firebase import get_current_user_id
 from config.s3 import upload_file_to_s3
 from config.firebase import get_firestore
-from rag.text_processing import extract_pdf_elements, process_extracted_elements_smart
+from rag.text_processing import (
+    extract_pdf_elements,
+    process_extracted_elements_smart,
+    combine_text_and_images,
+    smart_chunk,
+)
+from rag.image_processing import (
+    deduplicate_images,
+    compress_image,
+    get_cached_descriptions,
+    usage_stats,
+)
+from google import genai
 from agent.agent import RAGAgent
 
 router = APIRouter()
@@ -102,8 +114,46 @@ async def upload_pdf(
                         "vectorization": {"success": False, "error": f"PDF too large: {page_count} pages. Maximum allowed is 50 pages."}
                     }
                 else:
+                    # FULL RAG PIPELINE (text + image processing)
+                    print(f"\n[Pipeline] Found {len(text_chunks)} text chunks, {len(image_chunks)} images")
+                    client = genai.Client()
+
+                    combined_chunks = text_chunks
+
+                    if len(image_chunks) > 0:
+                        print("\n[Pipeline] Deduplicating images...")
+                        unique_images = deduplicate_images(image_chunks)
+                        print(f"  ✓ Kept {len(unique_images)} unique images")
+
+                        print("\n[Pipeline] Compressing images...")
+                        compressed_images = [
+                            {**img, "base64": compress_image(img["base64"])}
+                            for img in unique_images
+                        ]
+                        print(f"  ✓ Compressed {len(compressed_images)} images")
+
+                        print("\n[Pipeline] Describing images with Gemini Vision...")
+                        image_descriptions = get_cached_descriptions(compressed_images, client)
+                        print(f"  ✓ Got {len(image_descriptions)} descriptions")
+                        total_vision_tokens = usage_stats["vision_input"] + usage_stats["vision_output"]
+                        print(
+                            f"    Vision tokens used: {total_vision_tokens:,} (in: {usage_stats['vision_input']:,}, out: {usage_stats['vision_output']:,})"
+                        )
+
+                        print("\n[Pipeline] Combining text + images...")
+                        combined_chunks = combine_text_and_images(text_chunks, image_descriptions)
+                        print(
+                            f"  ✓ Created {len(combined_chunks)} combined chunks (includes {len(image_descriptions)} image descriptions)"
+                        )
+                    else:
+                        print("\n[Pipeline] ⚠️ No images detected, proceeding with text-only chunks")
+
+                    print("\n[Pipeline] Smart chunking...")
+                    final_chunks = smart_chunk(combined_chunks, chunk_size=1000, overlap=200)
+                    print(f"  ✓ Split into {len(final_chunks)} final chunks")
+
                     # VECTORIZE AND STORE IN PINECONE
-                    print(f"Vectorizing {len(text_chunks)} text chunks...")
+                    print(f"\nVectorizing {len(final_chunks)} chunks...")
                     try:
                         # Create namespace per folder (separate embeddings per folder)
                         if folder_id:
@@ -114,19 +164,19 @@ async def upload_pdf(
                         # Initialize RAG agent with folder-specific namespace
                         rag_agent = RAGAgent(namespace=namespace)
                         
-                        # Add text chunks to Pinecone vector database
-                        success = rag_agent.add_documents(text_chunks, s3_key=s3_key)
+                        # Add enriched chunks to Pinecone vector database
+                        success = rag_agent.add_documents(final_chunks, s3_key=s3_key)
                         
                         if success:
-                            print(f"✅ Successfully vectorized {len(text_chunks)} chunks in namespace: {namespace}")
+                            print(f"✅ Successfully vectorized {len(final_chunks)} chunks in namespace: {namespace}")
                             vectorization_result = {
                                 "success": True,
                                 "namespace": namespace,
-                                "chunks_vectorized": len(text_chunks),
+                                "chunks_vectorized": len(final_chunks),
                                 "vectorization_method": "pinecone"
                             }
                         else:
-                            print(f"❌ Failed to vectorize {len(text_chunks)} chunks")
+                            print(f"❌ Failed to vectorize {len(final_chunks)} chunks")
                             vectorization_result = {
                                 "success": False,
                                 "error": "Vectorization failed - check logs",
@@ -145,13 +195,16 @@ async def upload_pdf(
                     
                     # Create extraction result for successful processing
                     extraction = {
-                        "method": "rag_pipeline_s3_connected",
-                        "text_chunks": len(text_chunks),
-                        "image_chunks": len(image_chunks),
-                        "total_elements": len(elements),
+                        "method": "rag_pipeline_s3_connected_with_images",
+                        "text_chunks": sum(1 for c in final_chunks if not c.get("has_image")),
+                        "image_chunks": sum(1 for c in final_chunks if c.get("has_image")),
+                        "total_elements": len(final_chunks),
                         "s3_key": s3_key,
                         "s3_connected": True,
-                        "vectorization": vectorization_result
+                        "vectorization": {
+                            **vectorization_result,
+                            "vision_tokens": usage_stats["vision_input"] + usage_stats["vision_output"],
+                        },
                     }
                 
                 # Store metadata regardless of page limit (so user knows what happened)

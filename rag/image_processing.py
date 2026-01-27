@@ -90,88 +90,86 @@ def deduplicate_images(image_chunks: List[Dict]) -> List[Dict]:
 
 
 def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10) -> List[Dict]:
-    """
-    Process multiple images in one API call (HUGE cost savings).
-    Returns descriptions in the same order as input.
-    """
+    """Process multiple images per API call and parse responses by Image N labels."""
+    import re
+
     global usage_stats
-    descriptions = []
-    
+    descriptions: List[Dict] = []
+
     for i in range(0, len(image_chunks), batch_size):
-        batch = image_chunks[i:i + batch_size]
-        
+        batch = image_chunks[i : i + batch_size]
+
         try:
-            # Build multi-image prompt
-            parts = [{
-                "text": "Analyze these images/tables and provide descriptions. "
-                       "For each item, return JSON with format: "
-                       "{\"index\": <number>, \"description\": \"<detailed description>\"}\n"
-                       "Return a JSON array with all descriptions.\n\n"
-            }]
-            
+            parts = []
+
             for idx, img in enumerate(batch):
-                item_num = i + idx + 1
+                item_num = idx + 1  # 1-based within batch
                 if img['type'] == 'Table':
-                    prompt = f"{item_num}. Extract this table into clean Markdown format with proper headers:\n"
+                    prompt = (
+                        f"Image {item_num}: Extract this table into clean Markdown format with proper headers "
+                        "and describe its content.\n"
+                    )
                 else:
-                    prompt = f"{item_num}. Describe this diagram/image in detail for technical search. Include all labels and relationships:\n"
-                
+                    prompt = (
+                        f"Image {item_num}: Describe this diagram/image in detail for technical search. Include "
+                        "all visible labels, text, relationships, and key elements.\n"
+                    )
+
                 parts.append({"text": prompt})
                 parts.append({
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": img['base64']
-                    }
+                    "inline_data": {"mime_type": "image/jpeg", "data": img['base64']}
                 })
-            
+
             parts.append({
-                "text": "\nReturn ONLY a JSON array: [{\"index\": 1, \"description\": \"...\"}, ...]"
+                "text": (
+                    "\n\nFor each image, provide a detailed description. Format your response as:\n"
+                    "Image 1: [description]\nImage 2: [description]\n..."
+                )
             })
-            
-            # Make single API call for entire batch
+
             response = client.models.generate_content(
                 model="gemini-2.0-flash-lite",
-                contents=[{"role": "user", "parts": parts}]
+                contents=[{"role": "user", "parts": parts}],
             )
-            
-            # Track usage
+
             usage = response.usage_metadata
             if usage:
                 usage_stats["vision_input"] += usage.prompt_token_count
                 usage_stats["vision_output"] += usage.candidates_token_count
-                print(f"  [Batch {i//batch_size + 1}] Tokens: {usage.prompt_token_count} in / {usage.candidates_token_count} out")
-            
-            # Parse JSON response
+                print(
+                    f"  [Batch {i//batch_size + 1}] Tokens: {usage.prompt_token_count} in / {usage.candidates_token_count} out"
+                )
+
             response_text = response.text.strip()
-            # Remove markdown code blocks if present
-            if response_text.startswith("```"):
-                response_text = response_text.split("```")[1]
-                if response_text.startswith("json"):
-                    response_text = response_text[4:]
-                response_text = response_text.strip()
-            
-            result = json.loads(response_text)
-            
-            # Map descriptions back to original image chunks
-            for item in result:
-                idx = item['index'] - 1
-                if 0 <= idx < len(image_chunks):
-                    descriptions.append({
-                        'type': 'image_description',
-                        'original_type': image_chunks[idx]['type'],
-                        'content': item['description'],
-                        'metadata': image_chunks[idx]['metadata'],
-                        'index': idx + 1
-                    })
-        
+            pattern = r"Image\s+(\d+):\s*"
+            parts_split = re.split(pattern, response_text)
+
+            parsed_descriptions = {}
+            for j in range(1, len(parts_split), 2):
+                if j + 1 < len(parts_split):
+                    img_num = int(parts_split[j])
+                    description = parts_split[j + 1].strip()
+                    parsed_descriptions[img_num] = description
+
+            for idx, img in enumerate(batch):
+                img_num = idx + 1
+                description_text = parsed_descriptions.get(img_num, "No description available")
+                descriptions.append({
+                    'type': 'image_description',
+                    'original_type': img['type'],
+                    'content': description_text,
+                    'metadata': img['metadata'],
+                    'index': i + idx + 1,
+                })
+                print(f"  ✓ Image {i + idx + 1} described: {description_text[:80]}...")
+
         except Exception as e:
             print(f"✗ Error processing batch {i//batch_size + 1}: {e}")
-            # Fallback: process individually
             for idx, img in enumerate(batch):
                 desc = describe_single_image(img, client, i + idx + 1)
                 if desc:
                     descriptions.append(desc)
-    
+
     return descriptions
 
 

@@ -33,6 +33,9 @@ async def get_folder_analytics(
         
         # Initialize counters
         total_messages = 0
+        user_messages = 0
+        assistant_messages = 0
+        failed_ai_messages = 0
         mcq_count = 0
         doc_retrieval_count = 0
         
@@ -40,6 +43,7 @@ async def get_folder_analytics(
         for message in messages:
             data = message.to_dict()
             if data.get("role") == "error":
+                failed_ai_messages += 1
                 continue
             total_messages += 1
             
@@ -47,9 +51,14 @@ async def get_folder_analytics(
             is_user = data.get('isUser', False)
             mcq_is_true = data.get('mcqIsTrue', False) or data.get('mcq_is_true', False)
             has_mcqs = 'mcqs' in data and data['mcqs']
-            
+
             print(f"Message: isUser={is_user}, mcqIsTrue={mcq_is_true}, has_mcqs={has_mcqs}")
             print(f"  All data keys: {list(data.keys())}")
+
+            if is_user:
+                user_messages += 1
+            else:
+                assistant_messages += 1
             
             # Check if MCQ was asked (assistant message with mcqIsTrue)
             if not is_user and mcq_is_true:
@@ -68,8 +77,9 @@ async def get_folder_analytics(
             "total_messages": total_messages,
             "mcq_count": mcq_count,
             "doc_retrieval_count": doc_retrieval_count,
-            "user_messages": total_messages // 2,  # Approximate
-            "assistant_messages": total_messages // 2,  # Approximate
+            "user_messages": user_messages,
+            "assistant_messages": assistant_messages,
+            "failed_ai_messages": failed_ai_messages,
         }
         
     except Exception as e:

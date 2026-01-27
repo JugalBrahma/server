@@ -60,17 +60,14 @@ async def get_folder_analytics(
             else:
                 assistant_messages += 1
             
-            # Check if MCQ was asked (assistant message with mcqIsTrue)
-            if not is_user and mcq_is_true:
-                mcq_count += 1
-                print(f"  -> MCQ counted! Total: {mcq_count}")
-            elif not is_user and has_mcqs:
-                print(f"  -> Has MCQs but mcqIsTrue is false!")
+            # Count MCQs per assistant response
+            if not is_user and has_mcqs:
+                mcq_count += len(data['mcqs'])
+                print(f"  -> Added {len(data['mcqs'])} MCQs. Total: {mcq_count}")
             
             # Count document references based on stored fields
-            if not is_user:
-                if data.get('from_documents') is True:
-                    doc_retrieval_count += int(data.get('doc_reference_count', 0)) or 1
+            if not is_user and data.get('from_documents') is True:
+                doc_retrieval_count += 1
         
         return {
             "folder_id": folder_id,

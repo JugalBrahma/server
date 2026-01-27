@@ -61,11 +61,7 @@ class VectorSearchManager:
         self.retriever: Optional[PineconeHybridSearchRetriever] = None
 
         if self.hybrid_enabled:
-            self.bm25_storage_dir = Path(os.getenv(
-                "BM25_STORAGE_DIR",
-                Path(__file__).resolve().parent.parent.parent / "bm25_cache"
-            ))
-            self.bm25_storage_dir.mkdir(parents=True, exist_ok=True)
+            self.bm25_storage_dir = self._prepare_bm25_storage_dir()
             safe_namespace = self.namespace.replace("/", "_")
             self.bm25_state_path = self.bm25_storage_dir / f"{safe_namespace}_bm25.json"
             self.bm25_corpus_path = self.bm25_storage_dir / f"{safe_namespace}_corpus.json"
@@ -80,6 +76,31 @@ class VectorSearchManager:
         return GoogleGenerativeAIEmbeddings(
             model="models/gemini-embedding-001",
             config=types.EmbedContentConfig(output_dimensionality=3072)  # Match index dimension
+        )
+
+    def _prepare_bm25_storage_dir(self) -> Path:
+        """Return a writable directory for BM25 cache, falling back to /tmp."""
+        candidates = []
+        env_dir = os.getenv("BM25_STORAGE_DIR")
+        if env_dir:
+            candidates.append(Path(env_dir))
+        project_default = Path(__file__).resolve().parent.parent.parent / "bm25_cache"
+        candidates.append(project_default)
+        tmp_default = Path(os.getenv("TMPDIR", "/tmp")) / "bm25_cache"
+        candidates.append(tmp_default)
+
+        errors = []
+        for path in candidates:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                if os.access(path, os.W_OK):
+                    return path
+            except Exception as exc:
+                errors.append(f"{path}: {exc}")
+
+        raise RuntimeError(
+            "Unable to create a writable BM25 cache directory. "
+            f"Tried: {'; '.join(errors) or ', '.join(str(p) for p in candidates)}"
         )
     
     def _init_vector_store(self) -> PineconeVectorStore:

@@ -38,6 +38,7 @@ async def get_folder_analytics(
         failed_ai_messages = 0
         mcq_count = 0
         doc_retrieval_count = 0
+        total_tokens = 0
         
         # Count metrics
         for message in messages:
@@ -68,6 +69,11 @@ async def get_folder_analytics(
             # Count document references based on stored fields
             if not is_user and data.get('from_documents') is True:
                 doc_retrieval_count += 1
+            
+            # Count tokens from message
+            prompt_tokens = data.get('prompt_tokens', 0) or 0
+            completion_tokens = data.get('completion_tokens', 0) or 0
+            total_tokens += prompt_tokens + completion_tokens
         
         return {
             "folder_id": folder_id,
@@ -77,6 +83,7 @@ async def get_folder_analytics(
             "user_messages": user_messages,
             "assistant_messages": assistant_messages,
             "failed_ai_messages": failed_ai_messages,
+            "total_tokens": total_tokens,
         }
         
     except Exception as e:

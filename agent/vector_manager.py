@@ -455,6 +455,37 @@ class VectorSearchManager:
             print(f"❌ Failed to delete documents for {s3_key}: {e}")
             return False
     
+    def delete_namespace(self) -> bool:
+        """
+        Delete all vectors in the current namespace
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"🗑️ Deleting all vectors in namespace: {self.namespace}")
+            self.index.delete(delete_all=True, namespace=self.namespace)
+            print(f"✅ Deleted all vectors in namespace: {self.namespace}")
+            
+            # Also clean up BM25 files if they exist
+            if self.bm25_state_path and self.bm25_state_path.exists():
+                self.bm25_state_path.unlink()
+                print(f"🗑️ Deleted BM25 state: {self.bm25_state_path}")
+            
+            if self.bm25_corpus_path and self.bm25_corpus_path.exists():
+                self.bm25_corpus_path.unlink()
+                print(f"🗑️ Deleted BM25 corpus: {self.bm25_corpus_path}")
+            
+            mapping_path = self.bm25_storage_dir / f"{self.namespace.replace('/', '_')}_mapping.json" if self.bm25_storage_dir else None
+            if mapping_path and mapping_path.exists():
+                mapping_path.unlink()
+                print(f"🗑️ Deleted BM25 mapping: {mapping_path}")
+            
+            return True
+        except Exception as e:
+            print(f"❌ Failed to delete namespace {self.namespace}: {e}")
+            return False
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get vector store statistics"""
         try:

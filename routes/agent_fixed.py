@@ -14,6 +14,18 @@ class MemoryAction(BaseModel):
 
 router = APIRouter()
 
+# Cache for RAGAgent instances: {namespace: rag_agent}
+_agent_cache: dict[str, RAGAgent] = {}
+
+def get_cached_agent(namespace: str) -> RAGAgent:
+    """Get or create RAGAgent from cache."""
+    if namespace not in _agent_cache:
+        print(f"Creating new RAGAgent for namespace: {namespace}")
+        _agent_cache[namespace] = RAGAgent(namespace=namespace)
+    else:
+        print(f"Using cached RAGAgent for namespace: {namespace}")
+    return _agent_cache[namespace]
+
 @router.post("/agent")
 async def agent(
     query: Query, 
@@ -37,8 +49,8 @@ async def agent(
             namespace = f"user_{user_id}"
         print(f"DEBUG: Using namespace: {namespace}")
         
-        # 3️⃣ Initialize agent with folder-specific namespace
-        rag_agent = RAGAgent(namespace=namespace)
+        # 3️⃣ Get cached agent (or create if not exists)
+        rag_agent = get_cached_agent(namespace)
         
         # 4️⃣ Query agent (convert user query to lowercase)
         ai = rag_agent.query(query.query.lower())
@@ -77,7 +89,7 @@ async def manage_memory(
         else:
             namespace = f"user_{user_id}"
             
-        rag_agent = RAGAgent(namespace=namespace)
+        rag_agent = get_cached_agent(namespace)
         
         # 3️⃣ Perform memory action
         if action.action == "clear":

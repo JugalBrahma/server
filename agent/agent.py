@@ -8,6 +8,8 @@ RAG Agent with LangGraph
 import json
 from typing import TypedDict, Annotated, List, Any
 from collections import defaultdict
+import os
+import tiktoken
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, AnyMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
@@ -18,6 +20,21 @@ from .llm_manager import LLMManager
 from .vector_manager import VectorSearchManager
 from .conversation_manager import FirestoreConversationManager
 from pydantic import BaseModel, Field, ValidationError
+
+# Initialize tiktoken encoder for token counting
+try:
+    _tokenizer = tiktoken.encoding_for_model("gpt-4")
+except Exception:
+    _tokenizer = tiktoken.get_encoding("cl100k_base")
+
+def count_tokens(text: str) -> int:
+    """Count tokens using local tiktoken (fast, no API call)."""
+    if not text:
+        return 0
+    try:
+        return len(_tokenizer.encode(text))
+    except Exception:
+        return len(text) // 4
 
 class MCQ(BaseModel):
     question: str = Field(..., description="The multiple choice question")
@@ -35,6 +52,168 @@ class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
 
 # ==================== AGENT CONFIGURATION ====================
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_usage_from_message(message, input_text: str = ""):
+    """Return normalized token usage info from an AIMessage (if available).
+    Falls back to manual counting if API doesn't provide token usage."""
+    if message is None:
+        return None
+        
+    metadata = getattr(message, "response_metadata", None) or {}
+    
+    # Extract content from message - handle various formats
+    content = ""
+    if hasattr(message, "content"):
+        raw_content = message.content
+        if isinstance(raw_content, str):
+            content = raw_content
+        elif isinstance(raw_content, list):
+            # Handle list format (common in some LangChain versions)
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw_content
+            )
+    
+    print(f"DEBUG extract_usage: input_text='{input_text}', content='{content[:100]}...'")
+    print(f"DEBUG: Full metadata: {json.dumps(metadata, indent=2, default=str)[:500]}")
+    
+    # Try to get usage from API response metadata - check multiple locations
+    usage_meta = None
+    
+    # Check 1: Direct usage_metadata
+    if "usage_metadata" in metadata:
+        usage_meta = metadata["usage_metadata"]
+        print(f"DEBUG: Found usage_metadata at root level")
+    
+    # Check 2: Direct usage
+    elif "usage" in metadata:
+        usage_meta = metadata["usage"]
+        print(f"DEBUG: Found usage at root level")
+    
+    # Check 3: token_usage (older LangChain versions)
+    elif "token_usage" in metadata:
+        usage_meta = metadata["token_usage"]
+        print(f"DEBUG: Found token_usage at root level")
+    
+    # Check 4: Gemini specific nested in metadata
+    if not usage_meta and isinstance(metadata, dict):
+        inner_meta = metadata.get("metadata", {})
+        if isinstance(inner_meta, dict):
+            if "usage_metadata" in inner_meta:
+                usage_meta = inner_meta["usage_metadata"]
+                print(f"DEBUG: Found usage_metadata in metadata.metadata")
+            elif "usage" in inner_meta:
+                usage_meta = inner_meta["usage"]
+                print(f"DEBUG: Found usage in metadata.metadata")
+    
+    # Check 5: Check for direct token_count
+    if not usage_meta and isinstance(metadata, dict):
+        if "token_count" in metadata:
+            usage_meta = {"total_token_count": metadata["token_count"]}
+            print(f"DEBUG: Found token_count at root")
+        # Check in candidates (Gemini format)
+        candidates = metadata.get("candidates", [])
+        if candidates and isinstance(candidates, list):
+            first_candidate = candidates[0]
+            if isinstance(first_candidate, dict):
+                candidate_meta = first_candidate.get("metadata", {})
+                if "token_count" in candidate_meta:
+                    usage_meta = {"total_token_count": candidate_meta["token_count"]}
+                    print(f"DEBUG: Found token_count in candidates[0].metadata")
+    
+    print(f"DEBUG: usage_meta found: {usage_meta}")
+    
+    # If we got usage from API, normalize it
+    if isinstance(usage_meta, dict) and usage_meta:
+        # Gemini/Google GenAI specific field names
+        prompt_tokens = (
+            _safe_int(usage_meta.get("prompt_token_count"))
+            or _safe_int(usage_meta.get("promptTokens"))
+            or _safe_int(usage_meta.get("input_tokens"))
+            or _safe_int(usage_meta.get("prompt_tokens"))
+            or _safe_int(usage_meta.get("inputTokenCount"))
+        )
+        completion_tokens = (
+            _safe_int(usage_meta.get("candidates_token_count"))
+            or _safe_int(usage_meta.get("completion_token_count"))
+            or _safe_int(usage_meta.get("output_tokens"))
+            or _safe_int(usage_meta.get("candidatesTokens"))
+            or _safe_int(usage_meta.get("completion_tokens"))
+            or _safe_int(usage_meta.get("outputTokenCount"))
+        )
+        total_tokens = (
+            _safe_int(usage_meta.get("total_token_count"))
+            or _safe_int(usage_meta.get("totalTokens"))
+            or _safe_int(usage_meta.get("total_tokens"))
+            or _safe_int(usage_meta.get("totalTokenCount"))
+            or (
+                prompt_tokens + completion_tokens
+                if prompt_tokens is not None and completion_tokens is not None
+                else None
+            )
+        )
+        
+        print(f"DEBUG: Extracted - prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
+        
+        if prompt_tokens is not None or completion_tokens is not None:
+            normalized = {
+                key: value
+                for key, value in (
+                    ("prompt_tokens", prompt_tokens),
+                    ("completion_tokens", completion_tokens),
+                    ("total_tokens", total_tokens),
+                )
+                if value is not None
+            }
+            normalized["raw"] = usage_meta
+            print(f"DEBUG: Returning normalized usage from API: {normalized}")
+            return normalized
+    
+    # FALLBACK: Manually count tokens since API didn't provide them
+    print(f"DEBUG: API didn't return token usage, using manual counting")
+    
+    prompt_tokens = count_tokens(input_text) if input_text else 0
+    completion_tokens = count_tokens(content) if content else 0
+    total_tokens = prompt_tokens + completion_tokens
+    
+    print(f"DEBUG: Manually counted tokens - prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
+    
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "estimated": True  # Flag to indicate these are estimated counts
+    }
+
+
+def merge_usage_totals(*usages):
+    """Combine multiple usage dicts into summed totals."""
+    totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    found = False
+
+    for usage in usages:
+        if not usage:
+            continue
+        found = True
+        for key in totals:
+            value = usage.get(key)
+            if isinstance(value, (int, float)):
+                totals[key] += int(value)
+
+    if not found:
+        return None
+
+    # Drop zero entries if they never received data
+    cleaned = {k: v for k, v in totals.items() if v}
+    return cleaned or None
+
+
 class AgentConfig:
     def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
         # Initialize LLM Manager
@@ -271,6 +450,13 @@ class RAGAgent:
         result = self.graph.invoke(initial_state)
         final_message = result["messages"][-1]
 
+        try:
+            print("DEBUG: final_message type:", type(final_message))
+            print("DEBUG: final_message.response_metadata:", getattr(final_message, "response_metadata", None))
+            print("DEBUG: final_message.additional_kwargs:", getattr(final_message, "additional_kwargs", None))
+        except Exception as meta_exc:
+            print(f"DEBUG: Unable to log final_message metadata: {meta_exc}")
+
         if hasattr(final_message, 'content'):
             response_content = final_message.content
         else:
@@ -282,18 +468,40 @@ class RAGAgent:
                 for part in response_content
             )
 
-        # Detect MCQs using structured output
+        # Detect MCQs using structured output - ONLY if user asked for MCQs or response is long enough
         mcqs: List[MCQ] = []
-        try:
-            detection = self.config.mcq_chain.invoke({"text": response_content})
-            mcqs = detection.mcqs
-        except Exception as exc:
-            print(f"MCQ detection error: {exc}")
+        mcq_usage = None
+        
+        # Check if user explicitly asked for MCQs
+        user_asked_mcq = any(keyword in user_input.lower() for keyword in 
+                            ['mcq', 'quiz', 'test', 'question', 'exam', 'practice'])
+        
+        # Only run MCQ detection if user asked for it AND response is substantial
+        if user_asked_mcq and len(response_content) > 200:
+            try:
+                detection = self.config.mcq_chain.invoke({"text": response_content})
+                mcqs = detection.mcqs
+                mcq_usage = extract_usage_from_message(getattr(detection, "_lc_generation", None), user_input)
+            except Exception as exc:
+                print(f"MCQ detection error: {exc}")
+
+        answer_usage = extract_usage_from_message(final_message, user_input)
+
+        usage_payload = {
+            "answer": answer_usage,
+            "mcq_detection": mcq_usage,
+            "totals": merge_usage_totals(answer_usage, mcq_usage)
+        }
+        # Remove empty sections
+        usage_payload = {
+            key: value for key, value in usage_payload.items() if value
+        }
 
         payload = {
             "answer": response_content,
             "mcq_is_true": bool(mcqs),
             "mcqs": [mcq.model_dump() for mcq in mcqs],
+            "usage": usage_payload or None,
         }
 
         return payload

@@ -7,7 +7,9 @@ class LLMManager:
         self.api_key = os.getenv("GOOGLE_API_KEY")
         self.llm = ChatGoogleGenerativeAI(
             model=self.model_name,
-            google_api_key=self.api_key
+            google_api_key=self.api_key,
+            # Enable usage metadata for token counting
+            metadata={"return_token_count": True},
         )
     
     def get_llm(self):

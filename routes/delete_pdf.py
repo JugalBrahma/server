@@ -59,49 +59,17 @@ async def delete_pdf(
         else:
             namespace = f"user_{user_id}"
         
-        # Initialize RAG agent with user namespace
-        rag_agent = RAGAgent(namespace=namespace)
-        
-        # Get Pinecone index directly
+        # Initialize vector manager with the correct namespace
         from agent.vector_manager import VectorSearchManager
         vector_manager = VectorSearchManager(index_name="askadocument", namespace=namespace)
         
-        # Delete only vectors with matching s3_key in metadata
-        try:
-            # Use Pinecone's delete with metadata filter
-            index = vector_manager.pc.Index("askadocument")
-            
-            # Delete vectors where s3_key metadata matches the PDF's s3_key
-            delete_result = index.delete(
-                namespace=namespace,
-                filter={
-                    "s3_key": s3_key  # Match only this PDF's s3_key
-                }
-            )
-            
-            print(f"🗑️ Deleted vectors for s3_key: {s3_key}")
-            print(f"📊 Delete result: {delete_result}")
-            print(f"🎯 Targeted deletion from namespace: {namespace}")
-            
-        except Exception as delete_error:
-            print(f"⚠️ Could not delete specific vectors: {delete_error}")
-            # Fallback: try to get all vectors and filter manually
-            try:
-                # Get all vectors in namespace (limited)
-                stats = index.describe_index_stats()
-                namespace_stats = stats.get('namespaces', {}).get(namespace, {})
-                vector_count = namespace_stats.get('vectorCount', 0)
-                
-                if vector_count > 0:
-                    print(f"📊 Found {vector_count} vectors in namespace {namespace}")
-                    # For now, delete entire namespace as fallback
-                    index.delete(namespace=namespace, delete_all=True)
-                    print(f"🔄 Fallback: Deleted entire namespace due to filter limitations")
-                else:
-                    print(f"ℹ️ No vectors found in namespace {namespace}")
-                    
-            except Exception as fallback_error:
-                print(f"❌ Fallback deletion also failed: {fallback_error}")
+        # Delete vectors by s3_key (this properly handles the metadata filter)
+        deleted = vector_manager.delete_documents_by_s3_key(s3_key)
+        
+        if deleted:
+            print(f"🗑️ Deleted vectors for s3_key: {s3_key} from namespace: {namespace}")
+        else:
+            print(f"⚠️ No vectors found for s3_key: {s3_key} in namespace: {namespace}")
             
     except Exception as e:
         print(f"❌ Failed to delete from Pinecone: {e}")

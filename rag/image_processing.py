@@ -5,14 +5,17 @@ Image Processing Functions for RAG Pipeline
 - Caching and deduplication
 """
 
+import os
 import sys
 import hashlib
 import base64
 import json
 import io
 import pickle
+import re
+import time
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from PIL import Image
 from google import genai
 
@@ -22,28 +25,164 @@ usage_stats = {
     "vision_output": 0
 }
 
+VISION_MODEL = os.getenv("VISION_IMAGE_MODEL", "gemini-2.0-flash")
+PHASH_DISTANCE_THRESHOLD = int(os.getenv("VISION_PHASH_THRESHOLD", "6"))
+CACHE_VERSION = os.getenv("VISION_CACHE_VERSION", "v3")
+DEFAULT_CACHE_FILE = os.getenv(
+    "VISION_CACHE_FILE",
+    f"image_cache_{VISION_MODEL.replace('/', '_')}_{CACHE_VERSION}.pkl"
+)
+
+
+def _calc_content_hash(base64_str: str) -> str:
+    """Hash the original bytes (not the JPEG-compressed string) for stability."""
+    try:
+        return hashlib.md5(base64.b64decode(base64_str)).hexdigest()
+    except Exception:
+        return hashlib.md5(base64_str.encode()).hexdigest()
+
+
+def _calc_perceptual_hash(base64_str: str) -> str:
+    """Simple aHash to catch near-duplicates even if recompressed."""
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(base64_str)))
+        img = img.convert('L').resize((8, 8), Image.Resampling.LANCZOS)
+        pixels = list(img.getdata())
+        avg = sum(pixels) / len(pixels)
+        bits = ''.join('1' if p > avg else '0' for p in pixels)
+        return hex(int(bits, 2))[2:].rjust(16, '0')
+    except Exception:
+        return ""
+
+
+def _hamming_distance(hash_a: str, hash_b: str) -> int:
+    if not hash_a or not hash_b:
+        return 64  # max for 8x8 hash
+    return bin(int(hash_a, 16) ^ int(hash_b, 16)).count('1')
+
+
+def _resolve_cache_path(cache_file: Optional[str]) -> Path:
+    return Path(cache_file or DEFAULT_CACHE_FILE)
+
+
+def _call_model_with_retry(client, contents, max_retries: int = 3):
+    delay = 2
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return client.models.generate_content(
+                model=VISION_MODEL,
+                contents=contents
+            )
+        except Exception as err:
+            last_error = err
+            if attempt == max_retries:
+                raise
+            print(f"  ↻ Retry {attempt}/{max_retries} after error: {err}")
+            time.sleep(delay)
+            delay = min(delay * 2, 10)
+    raise last_error
+
+
+def _build_prompt_for_image(img_chunk: Dict, index: int) -> str:
+    metadata = img_chunk.get('metadata', {}) or {}
+    page = metadata.get('page')
+    page_hint = f" (page {page})" if page is not None else ""
+
+    chunk_type = (img_chunk.get('type') or 'Image').lower()
+    if chunk_type == 'table':
+        instruction = (
+            f"Image {index}{page_hint}: Extract this table into clean Markdown with clear headers, "
+            "units, totals, and any footnotes. Summarize trends after the table."
+        )
+    elif chunk_type in ('chart', 'diagram', 'graph'):
+        instruction = (
+            f"Image {index}{page_hint}: Describe this chart/diagram precisely for technical search. "
+            "List axes, scales, legends, data relationships, and any annotations or equations."
+        )
+    else:
+        instruction = (
+            f"Image {index}{page_hint}: Describe every visible label, printed text, numbers, "
+            "sections, UI elements, and spatial relationships. Capture intent and key insights."
+        )
+
+    extra = metadata.get('label')
+    if extra:
+        instruction += f" Context hint: {extra}."
+
+    return instruction + "\nProvide key facts suitable for retrieval."  
+
+
+def _parse_delimited_response(response_text: str, batch_start: int, batch_size: int) -> Dict[int, str]:
+    """Parse response using === IMAGE N === delimiters."""
+    parsed: Dict[int, str] = {}
+    if not response_text:
+        return parsed
+    
+    # Match === IMAGE N === or ===IMAGE N=== or similar variations
+    pattern = re.compile(r"=+\s*IMAGE\s+(\d+)\s*=+", re.IGNORECASE)
+    matches = list(pattern.finditer(response_text))
+    
+    for i, match in enumerate(matches):
+        img_num = int(match.group(1))
+        start_pos = match.end()
+        end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(response_text)
+        description = response_text[start_pos:end_pos].strip()
+        
+        # Map to global index
+        global_idx = batch_start + img_num
+        if 1 <= img_num <= batch_size and description:
+            parsed[global_idx] = description
+    
+    return parsed
+
+
 def is_meaningful_image(element) -> bool:
     """Filter out tiny logos, decorations, and inline icons."""
     meta = element.metadata
     
+    min_dimension = 100
+    min_area = 120 * 120
+    max_aspect_ratio = 6.0
+    width = height = None
+
     # Skip if too small (likely a logo/icon)
     if hasattr(meta, 'coordinates') and meta.coordinates:
         try:
             points = meta.coordinates.points
             width = max(p[0] for p in points) - min(p[0] for p in points)
             height = max(p[1] for p in points) - min(p[1] for p in points)
-            
-            # Skip images smaller than 100x100 pixels
-            if width < 100 or height < 100:
+
+            if width < min_dimension or height < min_dimension:
                 return False
-        except:
+
+            area = width * height
+            if area < min_area:
+                return False
+
+            smaller_side = max(1, min(width, height))
+            aspect_ratio = max(width, height) / smaller_side
+            if aspect_ratio > max_aspect_ratio and area < (200 * 200):
+                return False
+        except Exception:
             pass
-    
+
     # Skip if embedded in text (likely inline icon)
     parent_id = getattr(meta, 'parent_id', None)
     if parent_id and str(parent_id).startswith("Text"):
         return False
-        
+
+    label = getattr(meta, 'label', '')
+    if isinstance(label, str):
+        lowered = label.lower()
+        for noisy in ("logo", "decoration", "watermark", "background"):
+            if noisy in lowered:
+                return False
+
+    confidence = getattr(meta, 'confidence', 1.0)
+    if isinstance(confidence, (int, float)) and confidence < 0.15:
+        return False
+
     return True
 
 
@@ -70,29 +209,53 @@ def compress_image(base64_str: str, max_size: int = 1024) -> str:
 def deduplicate_images(image_chunks: List[Dict]) -> List[Dict]:
     """Remove duplicate images using MD5 hashing."""
     seen_hashes = {}
+    seen_perceptual_buckets: Dict[str, List[str]] = {}
     unique_images = []
     duplicates = 0
-    
+    near_duplicates = 0
+
     for img in image_chunks:
-        # Create hash of the image data
-        img_hash = hashlib.md5(img['base64'].encode()).hexdigest()
-        
-        if img_hash not in seen_hashes:
-            seen_hashes[img_hash] = True
-            unique_images.append(img)
-        else:
+        base64_data = img.get('base64')
+        if not base64_data:
+            continue
+
+        content_hash = _calc_content_hash(base64_data)
+        perceptual_hash = _calc_perceptual_hash(base64_data)
+
+        if content_hash in seen_hashes:
             duplicates += 1
-    
+            continue
+
+        if perceptual_hash:
+            bucket_key = perceptual_hash[:4]
+            bucket = seen_perceptual_buckets.setdefault(bucket_key, [])
+            is_near_duplicate = False
+            for existing_hash in bucket:
+                if _hamming_distance(existing_hash, perceptual_hash) <= PHASH_DISTANCE_THRESHOLD:
+                    near_duplicates += 1
+                    is_near_duplicate = True
+                    break
+            if is_near_duplicate:
+                continue
+            bucket.append(perceptual_hash)
+
+        seen_hashes[content_hash] = True
+        img.setdefault('metadata', {})
+        img['metadata']['content_hash'] = content_hash
+        if perceptual_hash:
+            img['metadata']['perceptual_hash'] = perceptual_hash
+        unique_images.append(img)
+
     if duplicates > 0:
-        print(f"  Removed {duplicates} duplicate images")
-    
+        print(f"  Removed {duplicates} byte-identical duplicate images")
+    if near_duplicates > 0:
+        print(f"  Removed {near_duplicates} perceptually similar images (hamming <= {PHASH_DISTANCE_THRESHOLD})")
+
     return unique_images
 
 
 def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10) -> List[Dict]:
     """Process multiple images per API call and parse responses by Image N labels."""
-    import re
-
     global usage_stats
     descriptions: List[Dict] = []
 
@@ -103,17 +266,9 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
             parts = []
 
             for idx, img in enumerate(batch):
-                item_num = idx + 1  # 1-based within batch
-                if img['type'] == 'Table':
-                    prompt = (
-                        f"Image {item_num}: Extract this table into clean Markdown format with proper headers "
-                        "and describe its content.\n"
-                    )
-                else:
-                    prompt = (
-                        f"Image {item_num}: Describe this diagram/image in detail for technical search. Include "
-                        "all visible labels, text, relationships, and key elements.\n"
-                    )
+                batch_index = idx + 1  # 1-based within batch
+                global_index = i + idx + 1
+                prompt = _build_prompt_for_image(img, global_index)
 
                 parts.append({"text": prompt})
                 parts.append({
@@ -122,14 +277,18 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
 
             parts.append({
                 "text": (
-                    "\n\nFor each image, provide a detailed description. Format your response as:\n"
-                    "Image 1: [description]\nImage 2: [description]\n..."
+                    "\n\nReturn descriptions in this exact format for each image:\n"
+                    "=== IMAGE 1 ===\n"
+                    "[detailed description here]\n"
+                    "=== IMAGE 2 ===\n"
+                    "[detailed description here]\n"
+                    "(continue for all images)"
                 )
             })
 
-            response = client.models.generate_content(
-                model="gemini-2.0-flash-lite",
-                contents=[{"role": "user", "parts": parts}],
+            response = _call_model_with_retry(
+                client,
+                contents=[{"role": "user", "parts": parts}]
             )
 
             usage = response.usage_metadata
@@ -141,27 +300,26 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
                 )
 
             response_text = response.text.strip()
-            pattern = r"Image\s+(\d+):\s*"
-            parts_split = re.split(pattern, response_text)
-
-            parsed_descriptions = {}
-            for j in range(1, len(parts_split), 2):
-                if j + 1 < len(parts_split):
-                    img_num = int(parts_split[j])
-                    description = parts_split[j + 1].strip()
-                    parsed_descriptions[img_num] = description
+            parsed_descriptions = _parse_delimited_response(response_text, i, len(batch))
 
             for idx, img in enumerate(batch):
-                img_num = idx + 1
-                description_text = parsed_descriptions.get(img_num, "No description available")
+                batch_index = idx + 1
+                global_index = i + idx + 1
+                description_text = parsed_descriptions.get(global_index, "No description available")
+                if description_text == "No description available":
+                    print(f"  ⚠️ Missing description for image {global_index}, retrying solo...")
+                    fallback_desc = describe_single_image(img, client, global_index)
+                    if fallback_desc:
+                        descriptions.append(fallback_desc)
+                        continue
                 descriptions.append({
                     'type': 'image_description',
                     'original_type': img['type'],
                     'content': description_text,
                     'metadata': img['metadata'],
-                    'index': i + idx + 1,
+                    'index': global_index,
                 })
-                print(f"  ✓ Image {i + idx + 1} described: {description_text[:80]}...")
+                print(f"  ✓ Image {global_index} described: {description_text[:80]}...")
 
         except Exception as e:
             print(f"✗ Error processing batch {i//batch_size + 1}: {e}")
@@ -177,13 +335,7 @@ def describe_single_image(img_chunk: Dict, client, index: int) -> Dict:
     """Fallback for single image processing."""
     global usage_stats
     try:
-        model_id = "gemini-2.0-flash-lite"
-        
-        prompt = (
-            "Extract this table into a Markdown format. Ensure headers are clear." 
-            if img_chunk['type'] == "Table" else 
-            "Describe this diagram/image in detail for a technical search engine. Include labels and relationships."
-        )
+        prompt = _build_prompt_for_image(img_chunk, index)
 
         contents = [{
             "role": "user",
@@ -191,9 +343,14 @@ def describe_single_image(img_chunk: Dict, client, index: int) -> Dict:
                 {"text": prompt},
                 {"inline_data": {"mime_type": "image/jpeg", "data": img_chunk['base64']}}
             ]
+        }, {
+            "role": "user",
+            "parts": [{
+                "text": "Respond ONLY with plain text description followed by bullet key points."
+            }]
         }]
 
-        response = client.models.generate_content(model=model_id, contents=contents)
+        response = _call_model_with_retry(client, contents)
         usage = response.usage_metadata
         
         if usage:
@@ -213,14 +370,15 @@ def describe_single_image(img_chunk: Dict, client, index: int) -> Dict:
         return None
 
 
-def get_cached_descriptions(image_chunks: List[Dict], client, cache_file: str = "image_cache.pkl") -> List[Dict]:
+def get_cached_descriptions(image_chunks: List[Dict], client, cache_file: Optional[str] = None) -> List[Dict]:
     """
     Cache image descriptions to avoid reprocessing.
     Only processes new/changed images.
     """
     cache = {}
-    if Path(cache_file).exists():
-        with open(cache_file, 'rb') as f:
+    cache_path = _resolve_cache_path(cache_file)
+    if cache_path.exists():
+        with open(cache_path, 'rb') as f:
             cache = pickle.load(f)
         print(f"  Loaded cache with {len(cache)} entries")
     
@@ -230,7 +388,10 @@ def get_cached_descriptions(image_chunks: List[Dict], client, cache_file: str = 
     
     for img in image_chunks:
         # Create hash of image
-        img_hash = hashlib.md5(img['base64'].encode()).hexdigest()
+        img_hash = img.get('metadata', {}).get('content_hash')
+        if not img_hash:
+            img_hash = _calc_content_hash(img['base64'])
+
         
         if img_hash in cache:
             cached_descriptions.append(cache[img_hash])
@@ -250,7 +411,7 @@ def get_cached_descriptions(image_chunks: List[Dict], client, cache_file: str = 
             cached_descriptions.append(desc)
         
         # Save updated cache
-        with open(cache_file, 'wb') as f:
+        with open(cache_path, 'wb') as f:
             pickle.dump(cache, f)
         print(f"  Cache updated with {len(new_images)} new entries")
     

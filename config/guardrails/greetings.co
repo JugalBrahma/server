@@ -1,0 +1,23 @@
+define user express greeting
+  "hi"
+  "hello"
+  "hey"
+  "hey there"
+  "howdy"
+  "greetings"
+  "good morning"
+  "good afternoon"
+  "good evening"
+  "how are you"
+  "how are you doing"
+  "what's up"
+  "sup"
+  "yo"
+
+define bot express greeting
+  "Hello! I am your Fusion Chat assistant. How can I help you with your documents today?"
+
+define flow handle greetings
+  user express greeting
+  bot express greeting
+  stop

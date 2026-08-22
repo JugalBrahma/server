@@ -9,9 +9,6 @@ class Query(BaseModel):
     query: str
     folder_id: str = None  # Optional folder ID for namespace
 
-class MemoryAction(BaseModel):
-    action: str  # "clear" or "summary"
-
 router = APIRouter()
 
 # Cache for RAGAgent instances: {namespace: rag_agent}
@@ -73,36 +70,4 @@ async def agent(
         raise he
     except Exception as e:
         print(f"Agent error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/agent/memory")
-async def manage_memory(
-    action: MemoryAction, 
-    user_id: str = Depends(get_current_user_id),
-    folder_id: str = Header(None, convert_underscores=False)
-):
-    """Manage conversation memory"""
-    try:
-        # 2️⃣ Get user's agent namespace
-        if folder_id:
-            namespace = f"user_{user_id}_folder_{folder_id}"
-        else:
-            namespace = f"user_{user_id}"
-            
-        rag_agent = get_cached_agent(namespace)
-        
-        # 3️⃣ Perform memory action
-        if action.action == "clear":
-            rag_agent.clear_memory()
-            return {"message": "Memory cleared successfully"}
-        elif action.action == "summary":
-            summary = rag_agent.get_memory_summary()
-            return {"summary": summary}
-        else:
-            raise HTTPException(status_code=400, detail="Invalid action. Use 'clear' or 'summary'")
-            
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        print(f"Memory management error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

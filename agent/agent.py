@@ -8,6 +8,7 @@ High-Performance Direct RAG Agent
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from langchain_core.messages import SystemMessage, HumanMessage
+from langsmith import traceable
 from .llm_manager import LLMManager
 from .vector_manager import VectorSearchManager
 from .guardrail import check_greeting_guardrail
@@ -29,6 +30,7 @@ class RAGAgent:
         self.config = AgentConfig(index_name, namespace)
         self.namespace = namespace
 
+    @traceable(run_type="retriever", name="Pinecone Document Retrieval")
     def retrieve_documents(self, query: str) -> str:
         """Search vector database for relevant document chunks"""
         try:
@@ -88,6 +90,7 @@ class RAGAgent:
             print(f"❌ Retrieval error: {e}")
             return ""
 
+    @traceable(run_type="chain", name="RAG Agent Query")
     def query(self, user_input: str) -> dict:
         """Process user query with greeting guardrail and single-pass RAG"""
         assert isinstance(user_input, str)

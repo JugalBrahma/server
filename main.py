@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import importlib
 import logging
+import config.langsmith
 
 app = FastAPI(title="RAG Backend API")
 

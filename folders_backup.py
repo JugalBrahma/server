@@ -4,7 +4,7 @@ Backup of Original Folders Module
 
 from fastapi import APIRouter, Header, HTTPException
 from firebase_admin import auth
-from services.database import get_firestore
+from config.firebase import get_firestore
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import sys

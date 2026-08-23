@@ -10,6 +10,7 @@ langchain_community
 langchain-google-genai
 langchain-pinecone
 langgraph
+langsmith
 pinecone-client
 pinecone-text
 pillow

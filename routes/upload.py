@@ -18,7 +18,7 @@ from rag.image_processing import (
     get_cached_descriptions,
     usage_stats,
 )
-from google import genai
+from openai import OpenAI
 from agent.agent import RAGAgent
 
 router = APIRouter()
@@ -116,7 +116,7 @@ async def upload_pdf(
                 else:
                     # FULL RAG PIPELINE (text + image processing)
                     print(f"\n[Pipeline] Found {len(text_chunks)} text chunks, {len(image_chunks)} images")
-                    client = genai.Client()
+                    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
                     combined_chunks = text_chunks
 
@@ -132,7 +132,7 @@ async def upload_pdf(
                         ]
                         print(f"  ✓ Compressed {len(compressed_images)} images")
 
-                        print("\n[Pipeline] Describing images with Gemini Vision...")
+                        print("\n[Pipeline] Describing images with OpenAI Vision...")
                         image_descriptions = get_cached_descriptions(compressed_images, client)
                         print(f"  ✓ Got {len(image_descriptions)} descriptions")
                         total_vision_tokens = usage_stats["vision_input"] + usage_stats["vision_output"]

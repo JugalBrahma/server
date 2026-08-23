@@ -10,16 +10,12 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.retrievers import PineconeHybridSearchRetriever
 from pinecone import Pinecone, ServerlessSpec
 from pinecone_text.sparse import BM25Encoder
-from google import genai
-from google.genai import types
 
-# Suppress verbose logging
-logging.getLogger("google").setLevel(logging.WARNING)
 
 class VectorSearchManager:
     """Manages vector database operations and document retrieval"""
@@ -71,12 +67,17 @@ class VectorSearchManager:
             reason = "disabled by user setting" if not self.hybrid_requested else "index metric must be dotproduct"
             print(f"ℹ️ Hybrid search disabled ({reason}). Falling back to dense embeddings only.")
     
-    def _init_embeddings(self) -> GoogleGenerativeAIEmbeddings:
-        """Initialize Google embeddings"""
-        return GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            config=types.EmbedContentConfig(output_dimensionality=3072)  # Match index dimension
+    def _init_embeddings(self) -> OpenAIEmbeddings:
+        """Initialize OpenAI embeddings (3072 dimensions to match index)"""
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print("⚠️ Warning: OPENAI_API_KEY is not set in environment.")
+        return OpenAIEmbeddings(
+            model="text-embedding-3-large",
+            dimensions=3072,
+            api_key=api_key
         )
+
 
     def _prepare_bm25_storage_dir(self) -> Path:
         """Return a writable directory for BM25 cache, falling back to /tmp."""

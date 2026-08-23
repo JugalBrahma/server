@@ -27,7 +27,7 @@ class LangSmithTokenTracker(BaseCallbackHandler):
         """Extract exact token usage from LLM response metadata."""
         p_tokens, c_tokens, t_tokens = 0, 0, 0
 
-        # Standard token usage metadata from Gemini / Groq / OpenAI / LangSmith
+        # Standard token usage metadata from Groq / OpenAI / LangSmith
         if response.llm_output and isinstance(response.llm_output, dict):
             usage = response.llm_output.get("token_usage") or response.llm_output.get("usage", {})
             if isinstance(usage, dict):

@@ -1,7 +1,7 @@
 """
 Image Processing Functions for RAG Pipeline
 - Image filtering and optimization
-- Batch processing with Gemini Vision
+- Batch processing with OpenAI Vision
 - Caching and deduplication
 """
 
@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from PIL import Image
-from google import genai
+from openai import OpenAI
 
 # Global usage stats
 usage_stats = {
@@ -25,13 +25,14 @@ usage_stats = {
     "vision_output": 0
 }
 
-VISION_MODEL = os.getenv("VISION_IMAGE_MODEL", "gemini-2.0-flash")
+VISION_MODEL = os.getenv("VISION_IMAGE_MODEL", "gpt-4o-mini")
 PHASH_DISTANCE_THRESHOLD = int(os.getenv("VISION_PHASH_THRESHOLD", "6"))
 CACHE_VERSION = os.getenv("VISION_CACHE_VERSION", "v3")
 DEFAULT_CACHE_FILE = os.getenv(
     "VISION_CACHE_FILE",
     f"image_cache_{VISION_MODEL.replace('/', '_')}_{CACHE_VERSION}.pkl"
 )
+
 
 
 def _calc_content_hash(base64_str: str) -> str:
@@ -65,14 +66,15 @@ def _resolve_cache_path(cache_file: Optional[str]) -> Path:
     return Path(cache_file or DEFAULT_CACHE_FILE)
 
 
-def _call_model_with_retry(client, contents, max_retries: int = 3):
+def _call_model_with_retry(client, messages, max_retries: int = 3):
     delay = 2
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            return client.models.generate_content(
+            return client.chat.completions.create(
                 model=VISION_MODEL,
-                contents=contents
+                messages=messages,
+                max_tokens=1000
             )
         except Exception as err:
             last_error = err
@@ -81,7 +83,10 @@ def _call_model_with_retry(client, contents, max_retries: int = 3):
             print(f"  ↻ Retry {attempt}/{max_retries} after error: {err}")
             time.sleep(delay)
             delay = min(delay * 2, 10)
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Model call failed: maximum retries reached.")
+
 
 
 def _build_prompt_for_image(img_chunk: Dict, index: int) -> str:
@@ -263,19 +268,20 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
         batch = image_chunks[i : i + batch_size]
 
         try:
-            parts = []
+            user_content = []
 
             for idx, img in enumerate(batch):
-                batch_index = idx + 1  # 1-based within batch
                 global_index = i + idx + 1
                 prompt = _build_prompt_for_image(img, global_index)
 
-                parts.append({"text": prompt})
-                parts.append({
-                    "inline_data": {"mime_type": "image/jpeg", "data": img['base64']}
+                user_content.append({"type": "text", "text": prompt})
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img['base64']}"}
                 })
 
-            parts.append({
+            user_content.append({
+                "type": "text",
                 "text": (
                     "\n\nReturn descriptions in this exact format for each image:\n"
                     "=== IMAGE 1 ===\n"
@@ -288,22 +294,21 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
 
             response = _call_model_with_retry(
                 client,
-                contents=[{"role": "user", "parts": parts}]
+                messages=[{"role": "user", "content": user_content}]
             )
 
-            usage = response.usage_metadata
+            usage = getattr(response, "usage", None)
             if usage:
-                usage_stats["vision_input"] += usage.prompt_token_count
-                usage_stats["vision_output"] += usage.candidates_token_count
+                usage_stats["vision_input"] += usage.prompt_tokens
+                usage_stats["vision_output"] += usage.completion_tokens
                 print(
-                    f"  [Batch {i//batch_size + 1}] Tokens: {usage.prompt_token_count} in / {usage.candidates_token_count} out"
+                    f"  [Batch {i//batch_size + 1}] Tokens: {usage.prompt_tokens} in / {usage.completion_tokens} out"
                 )
 
-            response_text = response.text.strip()
+            response_text = response.choices[0].message.content.strip()
             parsed_descriptions = _parse_delimited_response(response_text, i, len(batch))
 
             for idx, img in enumerate(batch):
-                batch_index = idx + 1
                 global_index = i + idx + 1
                 description_text = parsed_descriptions.get(global_index, "No description available")
                 if description_text == "No description available":
@@ -337,37 +342,38 @@ def describe_single_image(img_chunk: Dict, client, index: int) -> Dict:
     try:
         prompt = _build_prompt_for_image(img_chunk, index)
 
-        contents = [{
-            "role": "user",
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_chunk['base64']}}
-            ]
-        }, {
-            "role": "user",
-            "parts": [{
+        user_content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_chunk['base64']}"}
+            },
+            {
+                "type": "text",
                 "text": "Respond ONLY with plain text description followed by bullet key points."
-            }]
-        }]
+            }
+        ]
 
-        response = _call_model_with_retry(client, contents)
-        usage = response.usage_metadata
+        response = _call_model_with_retry(client, messages=[{"role": "user", "content": user_content}])
+        usage = getattr(response, "usage", None)
         
         if usage:
-            usage_stats["vision_input"] += usage.prompt_token_count
-            usage_stats["vision_output"] += usage.candidates_token_count
-            print(f"  [Image {index}] Tokens: {usage.prompt_token_count} in / {usage.candidates_token_count} out")
+            usage_stats["vision_input"] += usage.prompt_tokens
+            usage_stats["vision_output"] += usage.completion_tokens
+            print(f"  [Image {index}] Tokens: {usage.prompt_tokens} in / {usage.completion_tokens} out")
         
+        response_text = response.choices[0].message.content.strip()
         return {
             'type': 'image_description',
             'original_type': img_chunk['type'],
-            'content': response.text.strip(),
+            'content': response_text,
             'metadata': img_chunk['metadata'],
             'index': index
         }
     except Exception as e:
         print(f"✗ Error at Image {index}: {e}")
         return None
+
 
 
 def get_cached_descriptions(image_chunks: List[Dict], client, cache_file: Optional[str] = None) -> List[Dict]:

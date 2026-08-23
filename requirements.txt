@@ -7,7 +7,9 @@ pydantic
 python-multipart
 langchain
 langchain_community
-langchain-google-genai
+langchain-groq
+langchain-openai
+openai
 langchain-pinecone
 langgraph
 langsmith
@@ -20,4 +22,3 @@ pdfplumber
 pymupdf
 # Token counting
 tiktoken
-google-genai

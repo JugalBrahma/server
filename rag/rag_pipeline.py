@@ -6,11 +6,10 @@ RAG Pipeline Main Module
 """
 
 from typing import List, Dict, Any, Tuple
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
-from google import genai
-from google.genai import types
+from openai import OpenAI
 import os
 
 # Import modular components
@@ -35,11 +34,16 @@ class VectorStoreManager:
         self.index_name = index_name
         self.namespace = namespace
         self.pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            config=types.EmbedContentConfig(output_dimensionality=3072)
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print("⚠️ Warning: OPENAI_API_KEY is not set in environment.")
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-large",
+            dimensions=3072,
+            api_key=api_key
         )
         self.vector_store = self._init_vector_store()
+
     
     def _init_vector_store(self):
         """Initialize or connect to existing Pinecone index"""
@@ -154,7 +158,7 @@ def run_optimized_pipeline(pdf_path: str, use_cache: bool = True, index_name: st
     print("=" * 60)
     
     # Initialize clients
-    client = genai.Client()
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     vector_manager = VectorStoreManager(index_name, namespace)
     
     print("\n[1/7] Extracting PDF...")

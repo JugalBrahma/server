@@ -1,7 +1,7 @@
 """
 High-Performance Direct RAG Agent
 - Direct Document Retrieval via VectorSearchManager
-- Single-pass grounded synthesis with Gemini
+- Single-pass grounded synthesis with LLM (Groq / OpenAI)
 - Clean and fast response without extra LLM hops
 """
 
@@ -15,9 +15,9 @@ from .guardrail import check_greeting_guardrail
 
 
 class AgentConfig:
-    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
-        # Initialize Gemini 2.5 Flash LLM
-        self.llm_manager = LLMManager(model_name="gemini-2.5-flash")
+    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2", model_name: Optional[str] = None):
+        # Initialize LLM (uses default configured model from config/models.py or .env)
+        self.llm_manager = LLMManager(model_name=model_name)
         self.llm = self.llm_manager.get_llm()
         # Initialize Pinecone vector store manager for the given namespace
         self.vector_manager = VectorSearchManager(index_name, namespace)
@@ -26,8 +26,8 @@ class AgentConfig:
 class RAGAgent:
     """Streamlined RAG Agent for fast document retrieval and grounded answering"""
     
-    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
-        self.config = AgentConfig(index_name, namespace)
+    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2", model_name: Optional[str] = None):
+        self.config = AgentConfig(index_name=index_name, namespace=namespace, model_name=model_name)
         self.namespace = namespace
 
     @traceable(run_type="retriever", name="Pinecone Document Retrieval")
@@ -129,7 +129,7 @@ Answer:"""
             )
             user_prompt = user_input
 
-        # 4. Single LLM invocation (Gemini 2.5 Flash)
+        # 4. Single LLM invocation (Groq / OpenAI)
         response = self.config.llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt)

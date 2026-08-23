@@ -1,13 +1,25 @@
 import os
 import sys
+from openai import OpenAI
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from rag.text_processing import extract_pdf_elements, process_extracted_elements_smart
-from rag.image_processing import deduplicate_images, compress_image, get_cached_descriptions, describe_images_batch, combine_text_and_images, smart_chunk
-from rag.vector_store import store_in_pineconedb
-from utils.usage_stats import usage_stats
+from rag.text_processing import (
+    extract_pdf_elements,
+    process_extracted_elements_smart,
+    combine_text_and_images,
+    smart_chunk,
+)
+from rag.image_processing import (
+    deduplicate_images,
+    compress_image,
+    get_cached_descriptions,
+    describe_images_batch,
+    usage_stats,
+)
+from rag.rag_pipeline import VectorStoreManager
 
-def run_optimized_pipeline(pdf_path="data/rag_for_nlp.pdf", use_cache=True):
+def run_optimized_pipeline(pdf_path="data/rag_for_nlp.pdf", use_cache=True, index_name="askadocument", namespace="test-2"):
     """
     Run the complete optimized RAG pipeline.
     
@@ -22,6 +34,9 @@ def run_optimized_pipeline(pdf_path="data/rag_for_nlp.pdf", use_cache=True):
     print("OPTIMIZED RAG PIPELINE")
     print("=" * 60)
     
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    vector_manager = VectorStoreManager(index_name=index_name, namespace=namespace)
+
     print("\n[1/7] Extracting PDF...")
     raw_elements = extract_pdf_elements(pdf_path)
     print(f"✓ Extracted {len(raw_elements)} elements")
@@ -43,9 +58,9 @@ def run_optimized_pipeline(pdf_path="data/rag_for_nlp.pdf", use_cache=True):
     
     print("\n[5/7] Describing images (batched + cached)...")
     if use_cache:
-        image_descriptions = get_cached_descriptions(compressed_images)
+        image_descriptions = get_cached_descriptions(compressed_images, client)
     else:
-        image_descriptions = describe_images_batch(compressed_images)
+        image_descriptions = describe_images_batch(compressed_images, client)
     print(f"✓ Got {len(image_descriptions)} descriptions")
     
     print("\n[6/7] Combining text + images...")
@@ -56,8 +71,8 @@ def run_optimized_pipeline(pdf_path="data/rag_for_nlp.pdf", use_cache=True):
     final_chunks = smart_chunk(combined_chunks, chunk_size=1000, overlap=200)
     print(f"✓ Split into {len(final_chunks)} final chunks")
 
-    print("\n[8/7] Storing in Pinecone...")
-    vector_store = store_in_pineconedb(final_chunks)
+    print("\n[8/8] Storing in Pinecone...")
+    vector_manager.add_documents(final_chunks)
     
     # Summary
     print("\n" + "=" * 60)
@@ -73,18 +88,7 @@ def run_optimized_pipeline(pdf_path="data/rag_for_nlp.pdf", use_cache=True):
     print(f"  Vision output: {usage_stats['vision_output']:,}")
     print(f"  Total: {usage_stats['vision_input'] + usage_stats['vision_output']:,}")
     
-    # Model info
-    try:
-        from google import genai
-        client = genai.Client()
-        model_info = client.models.get(model="gemini-2.0-flash-lite")
-        print(f"\nModel Limits:")
-        print(f"  Input: {model_info.input_token_limit:,}")
-        print(f"  Output: {model_info.output_token_limit:,}")
-    except:
-        pass
-    
-    return vector_store, final_chunks
+    return vector_manager, final_chunks
 
 
 # ==================== ENTRY POINT ====================

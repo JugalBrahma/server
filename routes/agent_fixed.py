@@ -50,7 +50,11 @@ async def agent(
         rag_agent = get_cached_agent(namespace)
         
         # 4️⃣ Query agent (convert user query to lowercase)
-        ai = rag_agent.query(query.query.lower())
+        ai = rag_agent.query(
+            query.query.lower(),
+            folder_id=query.folder_id,
+            user_id=user_id,
+        )
         print(f"Agent response from namespace {namespace}: {ai}")
         
         # Check if the response contains document markers and count them

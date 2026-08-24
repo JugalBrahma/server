@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import importlib
@@ -32,6 +35,7 @@ include_router_safe("routes.folders", prefix="/api")
 include_router_safe("routes.upload")  # Temporarily disabled
 include_router_safe("routes.delete_pdf")
 include_router_safe("routes.agent_fixed")
+include_router_safe("routes.analytics", prefix="/api")
 include_router_safe("routes.debug_pdf", prefix="/debug")
 
 @app.get("/")

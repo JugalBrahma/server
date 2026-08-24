@@ -5,28 +5,32 @@ High-Performance Direct RAG Agent
 - Clean and fast response without extra LLM hops
 """
 
+import os
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langsmith import traceable
+from langsmith.run_helpers import get_current_run_tree
 from .llm_manager import LLMManager
 from .vector_manager import VectorSearchManager
 from .guardrail import check_greeting_guardrail
 
 
 class AgentConfig:
-    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2", model_name: Optional[str] = None):
+    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2", model_name: Optional[str] = None):
+        # Resolve index name from environment or fallback
+        index_name = index_name or os.getenv("PINECONE_INDEX_NAME", os.getenv("AGENT_INDEX_NAME", "askadocument"))
         # Initialize LLM (uses default configured model from config/models.py or .env)
         self.llm_manager = LLMManager(model_name=model_name)
         self.llm = self.llm_manager.get_llm()
         # Initialize Pinecone vector store manager for the given namespace
-        self.vector_manager = VectorSearchManager(index_name, namespace)
+        self.vector_manager = VectorSearchManager(index_name=index_name, namespace=namespace)
 
 
 class RAGAgent:
     """Streamlined RAG Agent for fast document retrieval and grounded answering"""
     
-    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2", model_name: Optional[str] = None):
+    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2", model_name: Optional[str] = None):
         self.config = AgentConfig(index_name=index_name, namespace=namespace, model_name=model_name)
         self.namespace = namespace
 
@@ -91,9 +95,24 @@ class RAGAgent:
             return ""
 
     @traceable(run_type="chain", name="RAG Agent Query")
-    def query(self, user_input: str) -> dict:
+    def query(self, user_input: str, folder_id: Optional[str] = None, user_id: Optional[str] = None) -> dict:
         """Process user query with greeting guardrail and single-pass RAG"""
         assert isinstance(user_input, str)
+        
+        # Attach folder and user context to LangSmith trace
+        try:
+            run_tree = get_current_run_tree()
+            if run_tree:
+                if folder_id:
+                    run_tree.extra.setdefault("metadata", {})["folder_id"] = folder_id
+                    if f"folder_{folder_id}" not in run_tree.tags:
+                        run_tree.tags.append(f"folder_{folder_id}")
+                if user_id:
+                    run_tree.extra.setdefault("metadata", {})["user_id"] = user_id
+                    if f"user_{user_id}" not in run_tree.tags:
+                        run_tree.tags.append(f"user_{user_id}")
+        except Exception as e:
+            print(f"⚠️ Trace metadata error: {e}")
         
         # 1. Ingress Guardrail: Check for simple greetings (instant return without search)
         is_greeting, greeting_reply = check_greeting_guardrail(user_input)

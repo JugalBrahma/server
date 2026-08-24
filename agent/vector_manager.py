@@ -20,7 +20,7 @@ from pinecone_text.sparse import BM25Encoder
 class VectorSearchManager:
     """Manages vector database operations and document retrieval"""
     
-    def __init__(self, index_name: str = "askadocument-dot", namespace: str = "test-2"):
+    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2"):
         """
         Initialize Vector Search Manager
         
@@ -28,7 +28,7 @@ class VectorSearchManager:
             index_name: Name of the Pinecone index
             namespace: Namespace for the index
         """
-        self.index_name = index_name
+        self.index_name = index_name or os.getenv("PINECONE_INDEX_NAME", os.getenv("AGENT_INDEX_NAME", "askadocument"))
         self.namespace = namespace
         
         # Initialize Pinecone
@@ -68,13 +68,13 @@ class VectorSearchManager:
             print(f"ℹ️ Hybrid search disabled ({reason}). Falling back to dense embeddings only.")
     
     def _init_embeddings(self) -> OpenAIEmbeddings:
-        """Initialize OpenAI embeddings (3072 dimensions to match index)"""
+        """Initialize OpenAI embeddings (1536 dimensions to match index)"""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             print("⚠️ Warning: OPENAI_API_KEY is not set in environment.")
         return OpenAIEmbeddings(
-            model="text-embedding-3-large",
-            dimensions=3072,
+            model="text-embedding-3-small",
+            dimensions=1536,
             api_key=api_key
         )
 
@@ -121,9 +121,12 @@ class VectorSearchManager:
             try:
                 self.pc.create_index(
                     name=self.index_name,
-                    dimension=3072,  # Match existing index dimension
+                    dimension=1536,  # Match existing index dimension
                     metric="cosine",
-                    spec=ServerlessSpec(cloud="aws", region="us-east-1")
+                    spec=ServerlessSpec(
+                        cloud="aws",
+                        region=os.getenv("PINECONE_REGION", "us-east-1")
+                    )
                 )
                 print(f"✅ Created new index: {self.index_name}")
                 
@@ -279,7 +282,7 @@ class VectorSearchManager:
             print(f"🌲 Index: {self.index_name}")
             print(f"🌲 Namespace: {self.namespace}")
             print(f"🌲 Embedding model: {self.embeddings.model}")
-            print(f"🌲 Embedding dimension: 3072")  # Fixed dimension
+            print(f"🌲 Embedding dimension: 1536")  # Fixed dimension
             
             # Handle both string and dictionary formats
             texts = []
@@ -495,7 +498,7 @@ class VectorSearchManager:
             return {
                 "index_name": self.index_name,
                 "namespace": self.namespace,
-                "dimension": 3072,
+                "dimension": 1536,
                 "metric": "cosine",
                 "vector_count": stats.get("total_vector_count", 0),
                 "namespaces": stats.get("namespaces", {})

@@ -5,7 +5,7 @@ RAG Pipeline Main Module
 - Manages vector store operations
 """
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
@@ -30,19 +30,29 @@ from .image_processing import (
 class VectorStoreManager:
     """Manages Pinecone vector store operations"""
     
-    def __init__(self, index_name: str = "askadocument", namespace: str = "test-2"):
-        self.index_name = index_name
+    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2"):
+        self.index_name = index_name or os.getenv("PINECONE_INDEX_NAME", os.getenv("AGENT_INDEX_NAME", "askadocument"))
         self.namespace = namespace
-        self.pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+        
+        # Initialize Pinecone client
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        self.pc = Pinecone(api_key=pinecone_api_key)
+        
+        # Initialize embeddings and vector store
+        self.embeddings = self._init_embeddings()
+        self.vector_store = self._init_vector_store()
+
+    def _init_embeddings(self) -> OpenAIEmbeddings:
+        """Initialize OpenAI embeddings (1536 dimensions)"""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             print("⚠️ Warning: OPENAI_API_KEY is not set in environment.")
-        self.embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-large",
-            dimensions=3072,
+            
+        return OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            dimensions=1536,
             api_key=api_key
         )
-        self.vector_store = self._init_vector_store()
 
     
     def _init_vector_store(self):
@@ -63,9 +73,12 @@ class VectorStoreManager:
             try:
                 self.pc.create_index(
                     name=self.index_name,
-                    dimension=3072,
+                    dimension=1536,
                     metric="cosine",
-                    spec=ServerlessSpec(cloud="aws", region="us-east-1")
+                    spec=ServerlessSpec(
+                        cloud="aws",
+                        region=os.getenv("PINECONE_REGION", "us-east-1")
+                    )
                 )
                 print(f"✅ Created new index: {self.index_name}")
                 

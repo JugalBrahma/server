@@ -2,8 +2,10 @@ from fastapi import APIRouter, Header, HTTPException, Request, Depends
 from pydantic import BaseModel
 from agent.agent import RAGAgent
 from config.firebase import get_current_user_id
+from evaluate.flutter_evaluator import evaluate_flutter_query
 import json
 import re
+import threading
 
 class Query(BaseModel):
     query: str
@@ -63,6 +65,13 @@ async def agent(
         
         # Count document references
         doc_count = len(re.findall(r'<doc>.*?</doc>', response_text))
+
+        # 5️⃣ Trigger LangSmith dataset experiment in background (non-blocking)
+        threading.Thread(
+            target=evaluate_flutter_query,
+            args=(query.query, response_text),
+            daemon=True,
+        ).start()
         
         return {
             "response": ai, 

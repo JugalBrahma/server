@@ -1,4 +1,5 @@
 import sys
+import re
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
@@ -46,12 +47,19 @@ def run_experiment(namespace: str = DEFAULT_NAMESPACE):
     ensure_dataset_exists()
     
     rag_agent = RAGAgent(namespace=namespace)
-
+    
     def predict(inputs: dict) -> dict:
         question = inputs.get("question", "")
         # Query RAG agent
         res = rag_agent.query(question)
-        answer = res.get("answer", "")
+        raw_answer = res.get("answer", "")
+
+        # Extract only post-think final response
+        if "</think>" in raw_answer:
+            clean_answer = raw_answer.split("</think>")[-1]
+        else:
+            clean_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL)
+        clean_answer = clean_answer.replace("<doc>", "").replace("</doc>", "").strip()
 
         # Retrieve dynamic contexts from Pinecone
         search_results = rag_agent.config.vector_manager.search(query=question, k=8)
@@ -60,7 +68,7 @@ def run_experiment(namespace: str = DEFAULT_NAMESPACE):
         ]
 
         return {
-            "output": answer,
+            "output": clean_answer,
             "retrieved_contexts": contexts,
         }
 

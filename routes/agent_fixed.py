@@ -70,6 +70,7 @@ async def agent(
         threading.Thread(
             target=evaluate_flutter_query,
             args=(query.query, response_text),
+            kwargs={"namespace": namespace},
             daemon=True,
         ).start()
         

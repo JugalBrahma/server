@@ -2,10 +2,29 @@
 .env
 .env.*
 !.env.example
+!.env.template
 firebase-adminsdk.json
 firebase-*.json
+service-account*.json
+google-credentials.json
+credentials.json
+*credentials*.json
 *.key
 *.pem
+*.p12
+*.pfx
+*.asc
+*.secret
+*.token
+private_key*
+secret_key*
+api_key*
+config_key*
+keys/
+secrets/
+secrets.json
+secrets.yaml
+secrets.yml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

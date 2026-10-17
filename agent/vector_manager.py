@@ -1,522 +1,370 @@
-"""
-Vector Search Manager Module
-- Manages all vector database operations
-- Handles document retrieval and similarity search
-"""
-
-import os
 import json
 import logging
+import os
+import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from langchain_community.retrievers import PineconeHybridSearchRetriever
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from langchain_community.retrievers import PineconeHybridSearchRetriever
 from pinecone import Pinecone, ServerlessSpec
 from pinecone_text.sparse import BM25Encoder
 
+logger = logging.getLogger(__name__)
 
-class VectorSearchManager:
-    """Manages vector database operations and document retrieval"""
-    
-    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2"):
-        """
-        Initialize Vector Search Manager
-        
-        Args:
-            index_name: Name of the Pinecone index
-            namespace: Namespace for the index
-        """
-        self.index_name = index_name or os.getenv("PINECONE_INDEX_NAME", os.getenv("AGENT_INDEX_NAME", "askadocument"))
-        self.namespace = namespace
-        
-        # Initialize Pinecone
-        self.pinecone_api_key = os.getenv("PINECONE_API_KEY")
-        if not self.pinecone_api_key:
-            raise ValueError("PINECONE_API_KEY environment variable is required")
-        
-        self.pc = Pinecone(api_key=self.pinecone_api_key)
-        self.index = self.pc.Index(self.index_name)
-        
-        # Initialize embeddings
-        self.embeddings = self._init_embeddings()
-        
-        # Initialize vector store
-        self.vector_store = self._init_vector_store()
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIM = 1536
+DENSE_DEFAULT_K = 2
+MIN_CHUNK_CHARS = 10
+MAX_METADATA_BYTES = 35_000  # Pinecone limit is 40KB
+MAX_LIST_METADATA = 10
+KEPT_METADATA_KEYS = ("page_number", "languages")
 
-        # Hybrid search configuration
-        self.hybrid_alpha = float(os.getenv("PINECONE_HYBRID_ALPHA", 0.5))
-        self.hybrid_requested = os.getenv("ENABLE_PINECONE_HYBRID", "true").lower() == "true"
-        self.hybrid_enabled = self.hybrid_requested and self._check_sparse_support()
 
-        self.bm25_storage_dir: Optional[Path] = None
-        self.bm25_state_path: Optional[Path] = None
-        self.bm25_corpus_path: Optional[Path] = None
-        self.bm25_encoder: Optional[BM25Encoder] = None
-        self.retriever: Optional[PineconeHybridSearchRetriever] = None
+# ---------------------------------------------------------------- config
 
-        if self.hybrid_enabled:
-            self.bm25_storage_dir = self._prepare_bm25_storage_dir()
-            safe_namespace = self.namespace.replace("/", "_")
-            self.bm25_state_path = self.bm25_storage_dir / f"{safe_namespace}_bm25.json"
-            self.bm25_corpus_path = self.bm25_storage_dir / f"{safe_namespace}_corpus.json"
-            self.bm25_encoder = self._load_bm25_encoder()
-            self.retriever = self._init_hybrid_retriever()
-        else:
-            reason = "disabled by user setting" if not self.hybrid_requested else "index metric must be dotproduct"
-            print(f"ℹ️ Hybrid search disabled ({reason}). Falling back to dense embeddings only.")
-    
-    def _init_embeddings(self) -> OpenAIEmbeddings:
-        """Initialize OpenAI embeddings (1536 dimensions to match index)"""
-        api_key = os.getenv("OPENAI_API_KEY")
+@dataclass(frozen=True)
+class VectorConfig:
+    index_name: str
+    api_key: str
+    region: str
+    hybrid_alpha: float
+    hybrid_requested: bool
+    bm25_dir: Path
+
+    @classmethod
+    def from_env(cls, index_name: Optional[str] = None) -> "VectorConfig":
+        api_key = os.getenv("PINECONE_API_KEY")
         if not api_key:
-            print("⚠️ Warning: OPENAI_API_KEY is not set in environment.")
-        return OpenAIEmbeddings(
-            model="text-embedding-3-small",
-            dimensions=1536,
-            api_key=api_key
+            raise ValueError("PINECONE_API_KEY environment variable is required")
+        return cls(
+            index_name=index_name
+            or os.getenv("PINECONE_INDEX_NAME", os.getenv("AGENT_INDEX_NAME", "askadocument")),
+            api_key=api_key,
+            region=os.getenv("PINECONE_REGION", "us-east-1"),
+            hybrid_alpha=float(os.getenv("PINECONE_HYBRID_ALPHA", 0.5)),
+            hybrid_requested=os.getenv("ENABLE_PINECONE_HYBRID", "true").lower() == "true",
+            bm25_dir=Path(os.getenv("BM25_STORAGE_DIR", "bm25_cache")),
         )
 
 
-    def _prepare_bm25_storage_dir(self) -> Path:
-        """Return a writable directory for BM25 cache, falling back to /tmp."""
-        candidates = []
-        env_dir = os.getenv("BM25_STORAGE_DIR")
-        if env_dir:
-            candidates.append(Path(env_dir))
-        project_default = Path(__file__).resolve().parent.parent.parent / "bm25_cache"
-        candidates.append(project_default)
-        tmp_default = Path(os.getenv("TMPDIR", "/tmp")) / "bm25_cache"
-        candidates.append(tmp_default)
+# ---------------------------------------------------------- BM25 storage
 
-        errors = []
-        for path in candidates:
-            try:
-                path.mkdir(parents=True, exist_ok=True)
-                if os.access(path, os.W_OK):
-                    return path
-            except Exception as exc:
-                errors.append(f"{path}: {exc}")
+class Bm25Store:
+    """On-disk BM25 state for one namespace: corpus, source mapping, fitted encoder."""
 
-        raise RuntimeError(
-            "Unable to create a writable BM25 cache directory. "
-            f"Tried: {'; '.join(errors) or ', '.join(str(p) for p in candidates)}"
-        )
-    
-    def _init_vector_store(self) -> PineconeVectorStore:
-        """Initialize or connect to existing Pinecone index"""
-        try:
-            # Try to connect to existing index
-            vector_store = PineconeVectorStore.from_existing_index(
-                index_name=self.index_name,
-                embedding=self.embeddings,
-                namespace=self.namespace
+    def __init__(self, directory: Path, namespace: str):
+        directory.mkdir(parents=True, exist_ok=True)
+        stem = namespace.replace("/", "_")
+        self._state_path = directory / f"{stem}_bm25.json"
+        self._corpus_path = directory / f"{stem}_corpus.json"
+        self._mapping_path = directory / f"{stem}_mapping.json"
+        self._lock = threading.Lock()
+        self.encoder = self._load_encoder()
+
+    # -- public
+
+    def add(self, texts: List[str], source: str) -> None:
+        with self._lock:
+            corpus = self._read(self._corpus_path, [])
+            mapping = self._read(self._mapping_path, {})
+            start = len(corpus)
+            corpus.extend(texts)
+            mapping.update({str(start + i): source for i in range(len(texts))})
+            self._save(corpus, mapping)
+            self._refit(corpus)
+
+    def remove_source(self, source: str) -> None:
+        with self._lock:
+            if not self._mapping_path.exists():
+                return
+            corpus = self._read(self._corpus_path, [])
+            mapping = self._read(self._mapping_path, {})
+
+            kept = [
+                (text, mapping.get(str(i)))
+                for i, text in enumerate(corpus)
+                if mapping.get(str(i)) != source
+            ]
+            if not kept:
+                self._clear_unlocked()
+                return
+            self._save(
+                [t for t, _ in kept],
+                {str(i): s for i, (_, s) in enumerate(kept)},
             )
-            return vector_store
-        except Exception as e:
-            print(f"⚠️ Could not connect to existing index: {e}")
-            
-            # Create new index if it doesn't exist
-            try:
-                self.pc.create_index(
-                    name=self.index_name,
-                    dimension=1536,  # Match existing index dimension
-                    metric="cosine",
-                    spec=ServerlessSpec(
-                        cloud="aws",
-                        region=os.getenv("PINECONE_REGION", "us-east-1")
-                    )
-                )
-                print(f"✅ Created new index: {self.index_name}")
-                
-                # Connect to the new index
-                vector_store = PineconeVectorStore.from_existing_index(
-                    index_name=self.index_name,
-                    embedding=self.embeddings,
-                    namespace=self.namespace
-                )
-                return vector_store
-            except Exception as create_error:
-                raise Exception(f"Failed to create or connect to index: {create_error}")
+            self._refit([t for t, _ in kept])
 
-    def _check_sparse_support(self) -> bool:
-        """Return True if Pinecone index allows sparse vectors (dotproduct metric)."""
-        try:
-            description = self.pc.describe_index(name=self.index_name)
-            metric = (description.get("metric") or description.get("spec", {}).get("metric") or "").lower()
-            if metric != "dotproduct":
-                print(f"⚠️ Pinecone index '{self.index_name}' uses metric '{metric or 'unknown'}', which cannot accept sparse vectors.")
-                return False
-            return True
-        except Exception as e:
-            print(f"⚠️ Unable to verify Pinecone sparse support: {e}. Defaulting to dense search.")
-            return False
+    def clear(self) -> None:
+        with self._lock:
+            self._clear_unlocked()
 
-    def _load_bm25_encoder(self) -> BM25Encoder:
-        """Load BM25 encoder state for this namespace if available"""
+    # -- internals
+
+    def _load_encoder(self) -> BM25Encoder:
         encoder = BM25Encoder().default()
-        if self.bm25_state_path and self.bm25_state_path.exists():
+        if self._state_path.exists():
             try:
-                encoder = encoder.load(str(self.bm25_state_path))
-                print(f"📁 Loaded BM25 encoder for namespace {self.namespace}")
+                return encoder.load(str(self._state_path))
             except Exception as e:
-                print(f"⚠️ Failed to load BM25 encoder state: {e}. Reinitializing with defaults.")
+                logger.warning("Failed to load BM25 encoder state: %s", e)
         return encoder
 
-    def _init_hybrid_retriever(self) -> Optional[PineconeHybridSearchRetriever]:
-        """Create Pinecone hybrid search retriever if BM25 encoder is ready"""
+    @staticmethod
+    def _read(path: Path, default):
+        if not path.exists():
+            return default
         try:
-            retriever = PineconeHybridSearchRetriever(
-                embeddings=self.embeddings,
-                sparse_encoder=self.bm25_encoder,
-                index=self.index,
-                alpha=self.hybrid_alpha,
-                namespace=self.namespace,
-                text_key="text"
-            )
-            return retriever
-        except Exception as e:
-            print(f"⚠️ Hybrid retriever initialization failed: {e}. Falling back to dense search.")
-            return None
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default
 
-    def _update_bm25_encoder(self, texts: List[str], s3_key: Optional[str] = None):
-        """Update BM25 encoder with new texts and persist state"""
-        if not texts or not self.hybrid_enabled:
-            return
+    def _save(self, corpus: List[str], mapping: Dict[str, str]) -> None:
+        self._corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
+        self._mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
 
-        corpus: List[str] = []
-        mapping: Dict[str, str] = {}
-        if self.bm25_corpus_path and self.bm25_corpus_path.exists():
-            try:
-                corpus = json.loads(self.bm25_corpus_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                print("⚠️ BM25 corpus file corrupted, resetting it.")
-                corpus = []
-        
-        mapping_path = self.bm25_storage_dir / f"{self.namespace.replace('/', '_')}_mapping.json"
-        if mapping_path.exists():
-            try:
-                mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                print("⚠️ BM25 mapping file corrupted, resetting it.")
-                mapping = {}
-
-        start_idx = len(corpus)
-        corpus.extend(texts)
-        
-        # Update mapping for new texts
-        for i, text in enumerate(texts):
-            mapping[str(start_idx + i)] = s3_key or "unknown"
-        
-        if self.bm25_corpus_path:
-            self.bm25_corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
-        mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
-
+    def _refit(self, corpus: List[str]) -> None:
         try:
             encoder = BM25Encoder().default()
             encoder.fit(corpus)
-            if self.bm25_state_path:
-                encoder.dump(str(self.bm25_state_path))
-            self.bm25_encoder = encoder
-            self.retriever = self._init_hybrid_retriever()
-            print(f"📦 BM25 encoder updated with {len(corpus)} documents for {self.namespace}")
+            encoder.dump(str(self._state_path))
+            self.encoder = encoder
         except Exception as e:
-            print(f"⚠️ Failed to update BM25 encoder: {e}")
+            logger.error("Failed to update BM25 encoder: %s", e)
 
-    def search(self, query: str, k: int = 2) -> List[Any]:
-        """
-        Search for similar documents
-        
-        Args:
-            query: Search query string
-            k: Number of documents to retrieve
-            
-        Returns:
-            List of similar documents
-        """
-        try:
-            print(f"🔍 Starting search for query: '{query}'")
-            print(f"🔍 Using k={k} results")
-            print(f"🔍 Index: {self.index_name}")
-            print(f"🔍 Namespace: {self.namespace}")
-            print(f"🔍 Embedding model: {self.embeddings.model}")
-            print(f"🔍 Vector store type: {type(self.vector_store)}")
-            
-            if self.hybrid_enabled and self.retriever:
-                results = self.retriever.invoke(query)
-            else:
-                if not self.hybrid_enabled:
-                    print("ℹ️ Hybrid search not available; using dense similarity search.")
-                results = self.vector_store.similarity_search(query, k=k)
-            
-            print(f"🔍 Search completed. Found {len(results)} results")
-            for i, result in enumerate(results):
-                print(f"🔍 Result {i+1}: {result.page_content[:100]}...")
-                if hasattr(result, 'metadata'):
-                    print(f"🔍 Metadata {i+1}: {result.metadata}")
-            
-            return results
-        except Exception as e:
-            print(f"❌ Search error: {e}")
-            print(f"❌ Error type: {type(e).__name__}")
-            print(f"❌ Full error: {repr(e)}")
-            return []
-    
-    def add_documents(self, documents: List[str], metadatas: Optional[List[Dict]] = None, s3_key: Optional[str] = None) -> bool:
-        """
-        Add documents to vector store
-        
-        Args:
-            documents: List of document texts OR list of document dictionaries
-            metadatas: Optional list of metadata dictionaries
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            print(f"🔄 Adding {len(documents)} documents to namespace: {self.namespace}")
-            print(f"📄 Document types: {[type(doc).__name__ for doc in documents[:3]]}")
-            
-            # Log Pinecone operation details
-            print(f"🌲 Index: {self.index_name}")
-            print(f"🌲 Namespace: {self.namespace}")
-            print(f"🌲 Embedding model: {self.embeddings.model}")
-            print(f"🌲 Embedding dimension: 1536")  # Fixed dimension
-            
-            # Handle both string and dictionary formats
-            texts = []
-            metadatas = []
-            
-            for i, doc in enumerate(documents):
-                if isinstance(doc, str):
-                    content = doc.strip()
-                    if content.isdigit() and len(content) <= 4:
-                        continue
-                    if len(content) < 10:
-                        continue
-                    texts.append(content)
-                    # Add metadata for string documents
-                    metadatas.append({
-                        "doc_id": f"doc_{i}",
-                        "source": "user_upload",
-                        "content_type": "text",
-                        "has_image": False
-                    })
-                elif isinstance(doc, dict) and 'content' in doc:
-                    content = str(doc['content']).strip()
-                    if content.isdigit() and len(content) <= 4:
-                        continue
-                    if len(content) < 10:
-                        continue
-                    texts.append(content)
-                    
-                    # Get provided metadata and clean it for Pinecone
-                    metadata = doc.get('metadata', {
-                        "doc_id": f"doc_{i}",
-                        "source": "user_upload",
-                        "content_type": "text",
-                        "has_image": False
-                    })
-                    
-                    # Clean metadata - remove complex objects that Pinecone can't handle
-                    cleaned_metadata = {}
-                    
-                    # Keep ONLY essential metadata to stay under 40KB limit
-                    essential_keys = ['page_number', 'content_type', 'languages']
-                    
-                    for key, value in metadata.items():
-                        if key in essential_keys:
-                            if isinstance(value, (str, int, float, bool)):
-                                # Keep simple types
-                                cleaned_metadata[key] = value
-                            elif isinstance(value, list) and all(isinstance(x, str) for x in value):
-                                # Keep lists of strings (like languages)
-                                cleaned_metadata[key] = value[:10]  # Limit list size
-                            else:
-                                # Convert other types to string (limit length)
-                                cleaned_metadata[key] = str(value)[:100]  # Limit string length
-                    
-                    # Add minimal required fields
-                    cleaned_metadata.update({
-                        "doc_id": f"doc_{i}",
-                        "s3_key": s3_key if s3_key else "user_upload",
-                        "content_type": doc.get('type', 'text'),
-                        "has_image": False
-                    })
-                    
-                    # Check metadata size (Pinecone limit is 40KB per vector)
-                    import json
-                    metadata_size = len(json.dumps(cleaned_metadata).encode('utf-8'))
-                    if metadata_size > 35000:  # Leave some buffer
-                        print(f"⚠️ Metadata too large ({metadata_size} bytes), further reducing...")
-                        # Keep only absolute essentials
-                        cleaned_metadata = {
-                            "doc_id": f"doc_{i}",
-                            "s3_key": s3_key if s3_key else "user_upload",
-                            "content_type": "text"
-                        }
-                        final_size = len(json.dumps(cleaned_metadata).encode('utf-8'))
-                        print(f"✅ Reduced metadata size to {final_size} bytes")
-                    
-                    metadatas.append(cleaned_metadata)
-                else:
-                    print(f"⚠️ Unexpected document format: {type(doc)} - {doc}")
-                    continue
-            
-            print(f"📝 Processing {len(texts)} text chunks with {len(metadatas)} metadata entries")
-            print(f"🧹 Cleaned metadata sample: {metadatas[0] if metadatas else 'None'}")
-            
-            self._update_bm25_encoder(texts, s3_key)
+    def _clear_unlocked(self) -> None:
+        for path in (self._state_path, self._corpus_path, self._mapping_path):
+            path.unlink(missing_ok=True)
+        self.encoder = BM25Encoder().default()
 
-            if self.hybrid_enabled and self.retriever:
-                result = self.retriever.add_texts(texts=texts, metadatas=metadatas, namespace=self.namespace)
-            else:
-                if not self.hybrid_enabled and self.hybrid_requested:
-                    print("ℹ️ Hybrid ingestion skipped because current Pinecone index does not support sparse vectors.")
-                result = self.vector_store.add_texts(texts=texts, metadatas=metadatas)
-            print(f"📊 Pinecone result: {result}")
-            print(f"✅ Successfully added {len(texts)} documents to namespace: {self.namespace}")
-            return True
-        except Exception as e:
-            print(f"❌ Failed to add documents to namespace {self.namespace}")
-            print(f"❌ Error type: {type(e).__name__}")
-            print(f"❌ Error message: {str(e)}")
-            print(f"❌ Full error: {repr(e)}")
-            print(f"❌ Error args: {e.args}")
-            print(f"❌ Pinecone operation: {type(self.vector_store).__name__}")
-            print(f"❌ Vector store type: {type(self.vector_store)}")
-            return False
-    
-    def delete_documents(self, doc_ids: List[str]) -> bool:
-        """
-        Delete documents from vector store by ID
-        
-        Args:
-            doc_ids: List of document IDs to delete
-            
-        Returns:
-            True if successful, False otherwise
-        """
+
+# --------------------------------------------------- chunk preparation
+
+def _unpack(doc: Any, fallback_meta: Optional[Dict]) -> Tuple[str, Dict, Dict]:
+    """Return (content, raw_metadata, doc_fields) for a str or dict chunk."""
+    if isinstance(doc, str):
+        return doc.strip(), fallback_meta or {}, {}
+    if isinstance(doc, dict) and "content" in doc:
+        return str(doc["content"]).strip(), doc.get("metadata") or {}, doc
+    return "", {}, {}
+
+
+def _is_noise(content: str) -> bool:
+    if len(content) < MIN_CHUNK_CHARS:
+        return True
+    return content.isdigit() and len(content) <= 4
+
+
+def _safe_metadata(raw: Dict) -> Dict:
+    out = {}
+    for key in KEPT_METADATA_KEYS:
+        if key not in raw:
+            continue
+        val = raw[key]
+        if isinstance(val, (str, int, float, bool)):
+            out[key] = val
+        elif isinstance(val, list):
+            out[key] = [str(x) for x in val[:MAX_LIST_METADATA]]
+    return out
+
+
+def _build_metadata(i: int, s3_key: Optional[str], fields: Dict, raw: Dict) -> Dict:
+    base = {"doc_id": f"doc_{i}", "s3_key": s3_key or "user_upload"}
+    metadata = {
+        **base,
+        "content_type": fields.get("type", "text"),
+        "has_image": bool(fields.get("has_image", False)),
+        **_safe_metadata(raw),
+    }
+    if len(json.dumps(metadata).encode("utf-8")) > MAX_METADATA_BYTES:
+        return {**base, "content_type": "text"}
+    return metadata
+
+
+def prepare_chunks(
+    documents: List[Any],
+    metadatas: Optional[List[Dict]] = None,
+    s3_key: Optional[str] = None,
+) -> Tuple[List[str], List[Dict]]:
+    """Filter noise and build clean (texts, metadatas) ready for indexing."""
+    texts, cleaned = [], []
+    for i, doc in enumerate(documents):
+        fallback = metadatas[i] if metadatas and i < len(metadatas) else None
+        content, raw, fields = _unpack(doc, fallback)
+        if not content or _is_noise(content):
+            continue
+        texts.append(content)
+        cleaned.append(_build_metadata(i, s3_key, fields, raw))
+    return texts, cleaned
+
+
+# --------------------------------------------------------------- manager
+
+class VectorSearchManager:
+    """Vector search over Pinecone, with optional BM25 hybrid retrieval."""
+
+    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2"):
+        self.config = VectorConfig.from_env(index_name)
+        self.index_name = self.config.index_name
+        self.namespace = namespace
+
+        self.pc = Pinecone(api_key=self.config.api_key)
+        self._ensure_index()
+        self.index = self.pc.Index(self.index_name)
+        self.metric = self._read_metric()
+
+        self.embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, dimensions=EMBEDDING_DIM)
+        self.vector_store = PineconeVectorStore.from_existing_index(
+            index_name=self.index_name, embedding=self.embeddings, namespace=namespace
+        )
+
+        self.hybrid_enabled = self.config.hybrid_requested and self.metric == "dotproduct"
+        self.bm25: Optional[Bm25Store] = None
+        self.retriever: Optional[PineconeHybridSearchRetriever] = None
+        if self.hybrid_enabled:
+            self.bm25 = Bm25Store(self.config.bm25_dir, namespace)
+            self._refresh_retriever()
+        else:
+            logger.info("Hybrid search disabled. Using dense embeddings.")
+
+    @property
+    def bm25_encoder(self) -> Optional[BM25Encoder]:  # backwards-compatible accessor
+        return self.bm25.encoder if self.bm25 else None
+
+    # -- setup
+
+    def _ensure_index(self) -> None:
+        if self.pc.has_index(self.index_name):
+            return
+        # Hybrid search needs dotproduct; dense-only can use cosine.
+        metric = "dotproduct" if self.config.hybrid_requested else "cosine"
+        logger.warning("Index '%s' not found. Creating (%s).", self.index_name, metric)
+        self.pc.create_index(
+            name=self.index_name,
+            dimension=EMBEDDING_DIM,
+            metric=metric,
+            spec=ServerlessSpec(cloud="aws", region=self.config.region),
+        )
+
+    def _read_metric(self) -> str:
         try:
-            print(f"🗑️ Deleting {len(doc_ids)} documents from namespace: {self.namespace}")
-            result = self.vector_store.delete(ids=doc_ids)
-            print(f"📊 Delete result: {result}")
-            return True
+            return (self.pc.describe_index(name=self.index_name).metric or "").lower()
         except Exception as e:
-            print(f"❌ Failed to delete documents: {e}")
-            return False
-    
-    def delete_documents_by_s3_key(self, s3_key: str) -> bool:
-        """
-        Delete vectors from Pinecone and remove corresponding texts from BM25 state
-        for a specific PDF (identified by s3_key).
-        """
+            logger.warning("Could not read Pinecone index metric: %s", e)
+            return ""
+
+    def _refresh_retriever(self) -> None:
+        """(Re)build the hybrid retriever so it picks up the latest BM25 encoder."""
         try:
-            # 1) Delete vectors from Pinecone
-            delete_result = self.index.delete(
-                filter={"s3_key": s3_key},
-                namespace=self.namespace
+            self.retriever = PineconeHybridSearchRetriever(
+                embeddings=self.embeddings,
+                sparse_encoder=self.bm25.encoder,
+                index=self.index,
+                alpha=self.config.hybrid_alpha,
+                namespace=self.namespace,
+                text_key="text",
             )
-            print(f"🗑️ Deleted vectors from Pinecone: {delete_result}")
+        except Exception as e:
+            logger.warning("Hybrid retriever initialization failed: %s", e)
+            self.retriever = None
 
-            # 2) Update BM25 corpus (if hybrid enabled)
-            if self.hybrid_enabled and self.bm25_corpus_path and self.bm25_corpus_path.exists():
-                # Load corpus and mapping
-                corpus = json.loads(self.bm25_corpus_path.read_text(encoding="utf-8"))
-                mapping_path = self.bm25_storage_dir / f"{self.namespace.replace('/', '_')}_mapping.json"
-                
-                if mapping_path.exists():
-                    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
-                else:
-                    print("⚠️ No mapping file found — cannot update BM25 corpus precisely")
-                    return False
+    # -- search
 
-                # Filter out texts belonging to this PDF
-                new_corpus = []
-                new_mapping = {}
-                new_idx = 0
+    def search(self, query: str, k: Optional[int] = None) -> List[Any]:
+        """Hybrid search if available, otherwise dense. `k` defaults per mode."""
+        try:
+            if self.retriever:
+                retriever = (
+                    self.retriever
+                    if k is None
+                    else self.retriever.model_copy(update={"top_k": k})
+                )
+                return retriever.invoke(query)
+            return self.vector_store.similarity_search(query, k=k or DENSE_DEFAULT_K)
+        except Exception as e:
+            logger.error("Search failed for query '%s': %s", query, e)
+            return []
 
-                for idx, text in enumerate(corpus):
-                    if mapping.get(str(idx)) != s3_key:
-                        new_corpus.append(text)
-                        new_mapping[str(new_idx)] = mapping.get(str(idx))
-                        new_idx += 1
+    # -- write
 
-                # Re-fit BM25 and save updated state
-                self.bm25_encoder = BM25Encoder().default()
-                self.bm25_encoder.fit(new_corpus)
-                self.bm25_encoder.dump(str(self.bm25_state_path))
-                self.bm25_corpus_path.write_text(json.dumps(new_corpus), encoding="utf-8")
-                mapping_path.write_text(json.dumps(new_mapping), encoding="utf-8")
+    def add_documents(
+        self,
+        documents: List[Any],
+        metadatas: Optional[List[Dict]] = None,
+        s3_key: Optional[str] = None,
+    ) -> bool:
+        try:
+            texts, cleaned = prepare_chunks(documents, metadatas, s3_key)
+            if not texts:
+                logger.warning("No valid text chunks to index.")
+                return False
 
-                # Re-initialize retriever with updated BM25
-                self.retriever = self._init_hybrid_retriever()
-                print(f"✅ Updated BM25 state after deleting {s3_key}")
+            if self.bm25:
+                self.bm25.add(texts, s3_key or "unknown")
+                self._refresh_retriever()  # must see the refit encoder before upserting
 
+            if self.retriever:
+                self.retriever.add_texts(texts=texts, metadatas=cleaned, namespace=self.namespace)
+            else:
+                self.vector_store.add_texts(texts=texts, metadatas=cleaned)
+
+            logger.info("Added %d documents to namespace '%s'", len(texts), self.namespace)
             return True
         except Exception as e:
-            print(f"❌ Failed to delete documents for {s3_key}: {e}")
+            logger.error("Failed to add documents to namespace '%s': %s", self.namespace, e)
             return False
-    
+
+    # -- delete
+
+    def delete_documents(self, doc_ids: List[str]) -> bool:
+        try:
+            self.vector_store.delete(ids=doc_ids)
+            return True
+        except Exception as e:
+            logger.error("Failed to delete documents: %s", e)
+            return False
+
+    def delete_documents_by_s3_key(self, s3_key: str) -> bool:
+        try:
+            self.index.delete(filter={"s3_key": s3_key}, namespace=self.namespace)
+            if self.bm25:
+                self.bm25.remove_source(s3_key)
+                self._refresh_retriever()
+            return True
+        except Exception as e:
+            logger.error("Failed to delete documents for %s: %s", s3_key, e)
+            return False
+
     def delete_namespace(self) -> bool:
-        """
-        Delete all vectors in the current namespace
-        
-        Returns:
-            True if successful, False otherwise
-        """
         try:
-            print(f"🗑️ Deleting all vectors in namespace: {self.namespace}")
             self.index.delete(delete_all=True, namespace=self.namespace)
-            print(f"✅ Deleted all vectors in namespace: {self.namespace}")
-            
-            # Also clean up BM25 files if they exist
-            if self.bm25_state_path and self.bm25_state_path.exists():
-                self.bm25_state_path.unlink()
-                print(f"🗑️ Deleted BM25 state: {self.bm25_state_path}")
-            
-            if self.bm25_corpus_path and self.bm25_corpus_path.exists():
-                self.bm25_corpus_path.unlink()
-                print(f"🗑️ Deleted BM25 corpus: {self.bm25_corpus_path}")
-            
-            mapping_path = self.bm25_storage_dir / f"{self.namespace.replace('/', '_')}_mapping.json" if self.bm25_storage_dir else None
-            if mapping_path and mapping_path.exists():
-                mapping_path.unlink()
-                print(f"🗑️ Deleted BM25 mapping: {mapping_path}")
-            
+            if self.bm25:
+                self.bm25.clear()
+                self._refresh_retriever()
             return True
         except Exception as e:
-            print(f"❌ Failed to delete namespace {self.namespace}: {e}")
+            logger.error("Failed to delete namespace %s: %s", self.namespace, e)
             return False
-    
+
+    # -- info
+
     def get_stats(self) -> Dict[str, Any]:
-        """Get vector store statistics"""
         try:
-            index = self.pc.Index(self.index_name)
-            stats = index.describe_index_stats()
+            stats = self.index.describe_index_stats()
             return {
                 "index_name": self.index_name,
                 "namespace": self.namespace,
-                "dimension": 1536,
-                "metric": "cosine",
+                "dimension": EMBEDDING_DIM,
+                "metric": self.metric,
                 "vector_count": stats.get("total_vector_count", 0),
-                "namespaces": stats.get("namespaces", {})
+                "namespaces": stats.get("namespaces", {}),
             }
         except Exception as e:
             return {"error": str(e)}
 
-# ==================== USAGE EXAMPLE ====================
+
 if __name__ == "__main__":
-    # Initialize Vector Search Manager
-    vector_manager = VectorSearchManager()
-    
-    # Get stats
-    print("🔍 Vector Search Manager Stats:")
-    stats = vector_manager.get_stats()
-    for key, value in stats.items():
-        print(f"  {key}: {value}")
-    
-    # Test search
-    results = vector_manager.search("machine learning", k=2)
-    print(f"📄 Found {len(results)} documents")
+    logging.basicConfig(level=logging.INFO)
+    print("Stats:", VectorSearchManager().get_stats())

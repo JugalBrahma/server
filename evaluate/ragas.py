@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import sys
@@ -5,6 +6,8 @@ import types
 from pathlib import Path
 from typing import List
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 SERVER_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(SERVER_ROOT / ".env")
@@ -30,7 +33,7 @@ if "langchain_community.llms" not in sys.modules:
 
 from openai import AsyncOpenAI
 from ragas.llms.base import llm_factory
-from ragas.metrics.collections import Faithfulness, ContextPrecision, ContextRecall
+from ragas.metrics.collections import ContextPrecision, ContextRecall, Faithfulness
 
 _faithfulness_metric = None
 _context_precision_metric = None
@@ -39,9 +42,8 @@ _context_recall_metric = None
 
 def _get_metrics():
     global _faithfulness_metric, _context_precision_metric, _context_recall_metric
-    if _faithfulness_metric is None or _context_precision_metric is None or _context_recall_metric is None:
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        evaluator_llm = llm_factory("gpt-4o-mini", client=client)
+    if _faithfulness_metric is None:
+        evaluator_llm = llm_factory("gpt-4o-mini", client=AsyncOpenAI())
         _faithfulness_metric = Faithfulness(llm=evaluator_llm)
         _context_precision_metric = ContextPrecision(llm=evaluator_llm)
         _context_recall_metric = ContextRecall(llm=evaluator_llm)
@@ -49,7 +51,6 @@ def _get_metrics():
 
 
 def clean_llm_response(text: str) -> str:
-    """Extracts only the final response after reasoning blocks (<think>...</think>) and removes doc tags."""
     if not text:
         return ""
     if "</think>" in text:
@@ -65,13 +66,13 @@ async def evaluate_faithfulness(
     retrieved_contexts: List[str],
 ) -> float:
     faithfulness_metric, _, _ = _get_metrics()
-    cleaned_response = clean_llm_response(response)
+    cleaned = clean_llm_response(response)
     score = await faithfulness_metric.ascore(
         user_input=user_input,
-        response=cleaned_response,
+        response=cleaned,
         retrieved_contexts=retrieved_contexts,
     )
-    print(f"Faithfulness Score: {score}")
+    logger.info("Faithfulness score: %s", score)
     return score
 
 
@@ -86,7 +87,7 @@ async def evaluate_context_precision(
         reference=reference,
         retrieved_contexts=retrieved_contexts,
     )
-    print(f"Context Precision Score: {score}")
+    logger.info("Context precision score: %s", score)
     return score
 
 
@@ -101,5 +102,5 @@ async def evaluate_context_recall(
         retrieved_contexts=retrieved_contexts,
         reference=reference,
     )
-    print(f"Context Recall Score: {score}")
+    logger.info("Context recall score: %s", score)
     return score

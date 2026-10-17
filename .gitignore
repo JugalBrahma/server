@@ -56,6 +56,7 @@ wheels/
 # Virtual environments
 venv/
 .venv/
+rag-venv/
 env/
 ENV/
 

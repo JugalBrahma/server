@@ -1,1 +1,0 @@
-# Deprecated: AstraDB is not used. Folder and user data are stored directly in Cloud Firestore.

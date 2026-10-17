@@ -5,225 +5,170 @@ RAG Pipeline Main Module
 - Manages vector store operations
 """
 
-from typing import List, Dict, Any, Tuple, Optional
+import logging
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from pinecone import Pinecone, ServerlessSpec
 from openai import OpenAI
-import os
+from pinecone import Pinecone, ServerlessSpec
 
-# Import modular components
-from .text_processing import (
-    extract_pdf_elements,
-    process_extracted_elements_smart,
-    combine_text_and_images,
-    smart_chunk
-)
 from .image_processing import (
     compress_image,
     deduplicate_images,
+    describe_images_batch,
     get_cached_descriptions,
-    usage_stats
+    usage_stats,
+)
+from .text_processing import (
+    combine_text_and_images,
+    extract_pdf_elements,
+    process_extracted_elements_smart,
+    smart_chunk,
 )
 
-# ==================== VECTOR STORE MANAGEMENT ====================
+logger = logging.getLogger(__name__)
+
+
 class VectorStoreManager:
-    """Manages Pinecone vector store operations"""
-    
+    """Manages Pinecone vector store operations for the pipeline."""
+
     def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2"):
         self.index_name = index_name or os.getenv("PINECONE_INDEX_NAME", os.getenv("AGENT_INDEX_NAME", "askadocument"))
         self.namespace = namespace
-        
-        # Initialize Pinecone client
-        pinecone_api_key = os.getenv("PINECONE_API_KEY")
-        self.pc = Pinecone(api_key=pinecone_api_key)
-        
-        # Initialize embeddings and vector store
-        self.embeddings = self._init_embeddings()
-        self.vector_store = self._init_vector_store()
 
-    def _init_embeddings(self) -> OpenAIEmbeddings:
-        """Initialize OpenAI embeddings (1536 dimensions)"""
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            print("⚠️ Warning: OPENAI_API_KEY is not set in environment.")
-            
-        return OpenAIEmbeddings(
+        api_key = os.getenv("PINECONE_API_KEY")
+        self.pc = Pinecone(api_key=api_key)
+
+        self.embeddings = OpenAIEmbeddings(
             model="text-embedding-3-small",
             dimensions=1536,
-            api_key=api_key
         )
+        self.vector_store = self._init_vector_store()
 
-    
-    def _init_vector_store(self):
-        """Initialize or connect to existing Pinecone index"""
+    def _init_vector_store(self) -> PineconeVectorStore:
         try:
-            # Try to connect to existing index
-            vector_store = PineconeVectorStore.from_existing_index(
+            return PineconeVectorStore.from_existing_index(
                 index_name=self.index_name,
                 embedding=self.embeddings,
-                namespace=self.namespace
+                namespace=self.namespace,
             )
-            # print(f"✅ Connected to existing index: {self.index_name}")  # Removed for speed
-            return vector_store
         except Exception as e:
-            print(f"⚠️ Could not connect to existing index: {e}")
-            
-            # Create new index if it doesn't exist
-            try:
-                self.pc.create_index(
-                    name=self.index_name,
-                    dimension=1536,
-                    metric="cosine",
-                    spec=ServerlessSpec(
-                        cloud="aws",
-                        region=os.getenv("PINECONE_REGION", "us-east-1")
-                    )
-                )
-                print(f"✅ Created new index: {self.index_name}")
-                
-                return PineconeVectorStore(
-                    index_name=self.index_name,
-                    embedding=self.embeddings,
-                    namespace=self.namespace
-                )
-            except Exception as create_error:
-                print(f"❌ Failed to create index: {create_error}")
-                raise
-    
-    def add_documents(self, chunks: List[Dict]):
-        """Add document chunks to vector store"""
+            logger.warning("Could not connect to index '%s' (%s). Creating new index.", self.index_name, e)
+            self.pc.create_index(
+                name=self.index_name,
+                dimension=1536,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud="aws",
+                    region=os.getenv("PINECONE_REGION", "us-east-1"),
+                ),
+            )
+            return PineconeVectorStore(
+                index_name=self.index_name,
+                embedding=self.embeddings,
+                namespace=self.namespace,
+            )
+
+    def add_documents(self, chunks: List[Dict]) -> None:
+        """Add document chunks with cleaned metadata to Pinecone."""
         try:
-            # Prepare documents and metadata
             texts = [chunk["content"] for chunk in chunks]
             metadatas = []
-            
+            unwanted_keys = {"image_base64", "coordinates", "image_payload"}
+
             for chunk in chunks:
-                # Clean metadata for Pinecone compatibility
                 meta = {}
-                for k, v in chunk["metadata"].items():
-                    # Skip binary/complex data
-                    if k in ["image_base64", "coordinates", "image_payload"]:
+                raw_meta = chunk.get("metadata") or {}
+
+                for k, v in raw_meta.items():
+                    if k in unwanted_keys:
                         continue
-                    
-                    # Handle different data types
                     if isinstance(v, (str, int, float, bool)):
                         meta[k] = v
-                    elif isinstance(v, list):
-                        if all(isinstance(item, str) for item in v):
-                            meta[k] = v
-                        else:
-                            meta[f"{k}_json"] = str(v)
-                    elif isinstance(v, dict):
+                    elif isinstance(v, list) and all(isinstance(item, str) for item in v):
+                        meta[k] = v
+                    else:
                         meta[f"{k}_json"] = str(v)
-                
-                # Add content type
-                meta["content_type"] = chunk["type"]
-                
-                # Add has_image flag
+
+                meta["content_type"] = chunk.get("type", "Text")
                 if chunk.get("has_image", False):
                     meta["has_image"] = True
-                
+
                 metadatas.append(meta)
-            
-            # Add to vector store
+
             self.vector_store.add_texts(
                 texts=texts,
                 metadatas=metadatas,
-                namespace=self.namespace
+                namespace=self.namespace,
             )
-            
-            print(f"✅ Added {len(chunks)} documents to vector store")
-            
+            logger.info("Added %d documents to namespace '%s'", len(chunks), self.namespace)
+
         except Exception as e:
-            print(f"❌ Failed to add documents: {e}")
+            logger.error("Failed to add documents to vector store: %s", e)
             raise
-    
+
     def search(self, query: str, k: int = 5) -> List[Any]:
-        """Search for relevant documents"""
+        """Search for relevant documents in the namespace."""
         try:
-            results = self.vector_store.similarity_search(
+            return self.vector_store.similarity_search(
                 query=query,
                 k=k,
-                namespace=self.namespace
+                namespace=self.namespace,
             )
-            return results
         except Exception as e:
-            print(f"❌ Search failed: {e}")
+            logger.error("Search failed for query '%s': %s", query, e)
             return []
 
-# ==================== MAIN PIPELINE ====================
-def run_optimized_pipeline(pdf_path: str, use_cache: bool = True, index_name: str = "askadocument", namespace: str = "test-2") -> Tuple[VectorStoreManager, List[Dict]]:
-    """
-    Run the complete optimized RAG pipeline.
-    
-    Args:
-        pdf_path: Path to PDF file
-        use_cache: Whether to use image description cache
-        index_name: Pinecone index name
-        namespace: Namespace for multi-tenancy
-    
-    Returns:
-        Tuple of (vector_store_manager, final_chunks)
-    """
-    print("=" * 60)
-    print("OPTIMIZED RAG PIPELINE")
-    print("=" * 60)
-    
-    # Initialize clients
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def run_optimized_pipeline(
+    pdf_path: str,
+    use_cache: bool = True,
+    index_name: str = "askadocument",
+    namespace: str = "test-2",
+) -> Tuple[VectorStoreManager, List[Dict]]:
+    """Run the complete RAG ingestion pipeline for a PDF document."""
+    logger.info("Starting RAG ingestion pipeline for: %s", pdf_path)
+
+    client = OpenAI()
     vector_manager = VectorStoreManager(index_name, namespace)
-    
-    print("\n[1/7] Extracting PDF...")
+
+    # 1. Extract elements
     raw_elements = extract_pdf_elements(pdf_path)
-    print(f"✓ Extracted {len(raw_elements)} elements")
-    
-    print("\n[2/7] Processing elements (smart filtering)...")
+    logger.info("Extracted %d raw elements", len(raw_elements))
+
+    # 2. Filter text & images
     text_chunks, image_chunks = process_extracted_elements_smart(raw_elements)
-    print(f"✓ Found {len(text_chunks)} text chunks, {len(image_chunks)} images/tables")
-    
-    print("\n[3/7] Deduplicating images...")
+    logger.info("Processed %d text chunks and %d image elements", len(text_chunks), len(image_chunks))
+
+    # 3. Deduplicate images
     unique_images = deduplicate_images(image_chunks)
-    print(f"✓ Kept {len(unique_images)} unique images")
-    
-    print("\n[4/7] Compressing images...")
+
+    # 4. Compress images
     compressed_images = [
-        {**img, 'base64': compress_image(img['base64'])}
+        {**img, "base64": compress_image(img["base64"])}
         for img in unique_images
     ]
-    print(f"✓ Compressed {len(compressed_images)} images")
-    
-    print("\n[5/7] Describing images (batched + cached)...")
+
+    # 5. Generate descriptions
     if use_cache:
         image_descriptions = get_cached_descriptions(compressed_images, client)
     else:
-        from .image_processing import describe_images_batch
         image_descriptions = describe_images_batch(compressed_images, client)
-    print(f"✓ Got {len(image_descriptions)} descriptions")
-    
-    print("\n[6/7] Combining text + images...")
+
+    # 6. Combine text + image descriptions
     combined_chunks = combine_text_and_images(text_chunks, image_descriptions)
-    print(f"✓ Created {len(combined_chunks)} combined chunks")
-    
-    print("\n[7/7] Smart chunking...")
+
+    # 7. Chunk and upsert
     final_chunks = smart_chunk(combined_chunks, chunk_size=1000, overlap=200)
-    print(f"✓ Split into {len(final_chunks)} final chunks")
-    
-    print("\n[8/8] Storing in vector database...")
     vector_manager.add_documents(final_chunks)
-    
-    # Summary
-    print("\n" + "=" * 60)
-    print("✅ PIPELINE COMPLETE!")
-    print("=" * 60)
-    print(f"\nChunk Statistics:")
-    print(f"  Total chunks: {len(final_chunks)}")
-    print(f"  With images: {sum(1 for c in final_chunks if c.get('has_image'))}")
-    print(f"  Text only: {sum(1 for c in final_chunks if not c.get('has_image'))}")
-    
-    print(f"\nToken Usage:")
-    print(f"  Vision input: {usage_stats['vision_input']:,}")
-    print(f"  Vision output: {usage_stats['vision_output']:,}")
-    print(f"  Total: {usage_stats['vision_input'] + usage_stats['vision_output']:,}")
-    
+
+    logger.info(
+        "Pipeline complete: %d total chunks (%d with images, %d text-only)",
+        len(final_chunks),
+        sum(1 for c in final_chunks if c.get("has_image")),
+        sum(1 for c in final_chunks if not c.get("has_image")),
+    )
+
     return vector_manager, final_chunks

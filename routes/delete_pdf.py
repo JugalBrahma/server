@@ -1,8 +1,11 @@
-from fastapi import APIRouter, Header, HTTPException, Depends
-from config.firebase import get_current_user_id
-from config.firebase import get_firestore
-from config.s3 import s3, BUCKET_NAME
-from agent.agent import RAGAgent
+import logging
+from fastapi import APIRouter, Depends, Header, HTTPException
+
+from agent.vector_manager import VectorSearchManager
+from config.firebase import get_current_user_id, get_firestore
+from config.s3 import BUCKET_NAME, s3
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 db = get_firestore()
@@ -10,69 +13,56 @@ db = get_firestore()
 
 @router.delete("/pdf/{pdf_id}")
 async def delete_pdf(
-    pdf_id: str, 
+    pdf_id: str,
     user_id: str = Depends(get_current_user_id),
-    folder_id: str = Header(None, convert_underscores=False)
+    folder_id: str = Header(None, convert_underscores=False),
 ):
-    # 2️⃣ Get PDF metadata - check folder first, then user root
+    # Locate the PDF document in Firestore
     if folder_id:
-        # Look in folder subcollection
-        doc_ref = db.collection("users") \
-            .document(user_id) \
-            .collection("folders") \
-            .document(folder_id) \
-            .collection("pdfs") \
+        doc_ref = (
+            db.collection("users")
+            .document(user_id)
+            .collection("folders")
+            .document(folder_id)
+            .collection("pdfs")
             .document(pdf_id)
+        )
     else:
-        # Look in user root (fallback for old uploads)
-        doc_ref = db.collection("users") \
-            .document(user_id) \
-            .collection("pdfs") \
+        doc_ref = (
+            db.collection("users")
+            .document(user_id)
+            .collection("pdfs")
             .document(pdf_id)
+        )
 
     doc = doc_ref.get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="PDF not found")
 
-    data = doc.to_dict()
-    s3_key = data["s3_key"]
+    data = doc.to_dict() or {}
+    s3_key = data.get("s3_key")
+    if not s3_key:
+        raise HTTPException(status_code=400, detail="Missing s3_key for PDF")
 
-    print(f"Deleting PDF: {pdf_id}, s3_key: {s3_key}, folder_id: {folder_id}")
-
-    # 3️⃣ Delete from S3
+    # Delete the PDF file from S3
     try:
         s3.delete_object(Bucket=BUCKET_NAME, Key=s3_key)
-        print(f"Deleted S3 object: {s3_key}")
-    except Exception as e:
-        print(f"Failed to delete S3 object {s3_key}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"S3 delete failed: {str(e)}")
+        logger.info("Deleted S3 object: %s", s3_key)
+    except Exception as exc:
+        logger.exception("Failed to delete S3 object %s: %s", s3_key, exc)
+        raise HTTPException(status_code=500, detail=f"S3 delete failed: {str(exc)}")
 
-    # 4️⃣ Delete Firestore metadata
+    # Delete the document from Firestore
     doc_ref.delete()
-    print(f"Deleted Firestore PDF: {pdf_id}")
+    logger.info("Deleted Firestore document for PDF: %s", pdf_id)
 
-    # 🆕 5️⃣ Delete from Pinecone vector store
+    # Delete vector embeddings from Pinecone
     try:
-        # Use folder-specific namespace when available (matches upload behavior)
-        if folder_id:
-            namespace = f"user_{user_id}_folder_{folder_id}"
-        else:
-            namespace = f"user_{user_id}"
-        
-        # Initialize vector manager with the correct namespace
-        from agent.vector_manager import VectorSearchManager
+        namespace = f"user_{user_id}_folder_{folder_id}" if folder_id else f"user_{user_id}"
         vector_manager = VectorSearchManager(index_name="askadocument", namespace=namespace)
-        
-        # Delete vectors by s3_key (this properly handles the metadata filter)
-        deleted = vector_manager.delete_documents_by_s3_key(s3_key)
-        
-        if deleted:
-            print(f"🗑️ Deleted vectors for s3_key: {s3_key} from namespace: {namespace}")
-        else:
-            print(f"⚠️ No vectors found for s3_key: {s3_key} in namespace: {namespace}")
-            
-    except Exception as e:
-        print(f"❌ Failed to delete from Pinecone: {e}")
-        # Continue anyway - S3 and Firestore deletion already done
-        
+        vector_manager.delete_documents_by_s3_key(s3_key)
+        logger.info("Deleted vectors for s3_key %s in namespace %s", s3_key, namespace)
+    except Exception as exc:
+        logger.warning("Failed to delete vectors from Pinecone: %s", exc)
+
     return {"message": "PDF deleted successfully"}

@@ -75,11 +75,11 @@ class VectorStoreManager:
         """Add document chunks with cleaned metadata to Pinecone."""
         try:
             texts = [chunk["content"] for chunk in chunks]
-            metadatas = []
+            metadatas: List[Dict[str, Any]] = []
             unwanted_keys = {"image_base64", "coordinates", "image_payload"}
 
             for chunk in chunks:
-                meta = {}
+                meta: Dict[str, Any] = {}
                 raw_meta = chunk.get("metadata") or {}
 
                 for k, v in raw_meta.items():

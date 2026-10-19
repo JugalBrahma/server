@@ -141,52 +141,6 @@ def _parse_delimited_response(response_text: str, batch_start: int, batch_size: 
     return parsed
 
 
-def is_meaningful_image(element: Any) -> bool:
-    """Filter out tiny logos, decorations, and inline icons."""
-    meta = getattr(element, "metadata", None)
-    if not meta:
-        return True
-
-    min_dimension = 100
-    min_area = 120 * 120
-    max_aspect_ratio = 6.0
-
-    if hasattr(meta, "coordinates") and meta.coordinates:
-        try:
-            points = meta.coordinates.points
-            width = max(p[0] for p in points) - min(p[0] for p in points)
-            height = max(p[1] for p in points) - min(p[1] for p in points)
-
-            if width < min_dimension or height < min_dimension:
-                return False
-
-            area = width * height
-            if area < min_area:
-                return False
-
-            smaller_side = max(1, min(width, height))
-            aspect_ratio = max(width, height) / smaller_side
-            if aspect_ratio > max_aspect_ratio and area < (200 * 200):
-                return False
-        except Exception:
-            pass
-
-    parent_id = getattr(meta, "parent_id", None)
-    if parent_id and str(parent_id).startswith("Text"):
-        return False
-
-    label = getattr(meta, "label", "")
-    if isinstance(label, str):
-        lowered = label.lower()
-        for noisy in ("logo", "decoration", "watermark", "background"):
-            if noisy in lowered:
-                return False
-
-    confidence = getattr(meta, "confidence", 1.0)
-    if isinstance(confidence, (int, float)) and confidence < 0.15:
-        return False
-
-    return True
 
 
 def compress_image(base64_str: str, max_size: int = 1024) -> str:

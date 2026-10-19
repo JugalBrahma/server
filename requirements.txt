@@ -5,21 +5,20 @@ python-dotenv
 boto3
 pydantic
 python-multipart
+requests
 langchain
+langchain-text-splitters
 langchain_community
 langchain-google-vertexai
 langchain-groq
 langchain-openai
 openai
 langchain-pinecone
-langgraph
 langsmith
 pinecone>=6,<8
 pinecone-text
 pillow
-# PDF processing without unstructured
-pypdf
-pdfplumber
+# PDF processing
 pymupdf
 # Token counting
 tiktoken

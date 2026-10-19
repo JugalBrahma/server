@@ -1,5 +1,4 @@
 import argparse
-import asyncio
 import logging
 import os
 import re
@@ -9,6 +8,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 SERVER_ROOT = Path(__file__).resolve().parent.parent
+script_dir = str(Path(__file__).resolve().parent)
+sys.path = [p for p in sys.path if p != script_dir]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 load_dotenv(SERVER_ROOT / ".env")
@@ -17,11 +18,11 @@ from langsmith import Client, evaluate  # noqa: E402
 
 from agent.agent import RAGAgent  # noqa: E402
 from evaluate.datasets_data import examples  # noqa: E402
-from evaluate.ragas import evaluate_faithfulness  # noqa: E402
+from evaluate.metrics import EVALUATORS
 
 logger = logging.getLogger(__name__)
 
-DATASET_NAME = "A Country Doctor QA Dataset"
+DATASET_NAME = os.getenv("DATASET_NAME", "datasets_data")
 DATASET_DESCRIPTION = "QA Dataset for A Country Doctor"
 EXPERIMENT_PREFIX = "country-doctor-eval"
 DEFAULT_NAMESPACE = os.getenv(
@@ -69,7 +70,7 @@ def ensure_dataset(client: Client) -> None:
 def build_predict(rag_agent: RAGAgent):
     def predict(inputs: dict) -> dict:
         question = inputs.get("question", "")
-        result = rag_agent.query(question)
+        result = rag_agent.query(user_input=question) # type: ignore
 
         # Ideally use the contexts the agent actually retrieved, e.g.
         # result["contexts"], if query() can expose them. Fallback below
@@ -85,33 +86,18 @@ def build_predict(rag_agent: RAGAgent):
     return predict
 
 
-def faithfulness_evaluator(run, example) -> dict:
-    contexts = run.outputs.get("retrieved_contexts", [])
-    if not contexts:
-        return {"key": "faithfulness", "score": 0.0}
-
-    score = asyncio.run(
-        evaluate_faithfulness(
-            user_input=example.inputs.get("question", ""),
-            response=run.outputs.get("output", ""),
-            retrieved_contexts=contexts,
-        )
-    )
-    return {"key": "faithfulness", "score": score}
-
-
-def run_experiment(namespace: str = DEFAULT_NAMESPACE):
+def run_experiment(namespace: str = DEFAULT_NAMESPACE, dataset_name: str = DATASET_NAME):
     if not namespace:
         raise ValueError("Provide a namespace via --namespace or EVAL_NAMESPACE")
 
     client = Client()
     ensure_dataset(client)
 
-    logger.info("Starting evaluation for '%s'", DATASET_NAME)
+    logger.info("Starting evaluation for '%s'", dataset_name)
     results = evaluate(
         build_predict(RAGAgent(namespace=namespace)),
-        data=DATASET_NAME,
-        evaluators=[faithfulness_evaluator],
+        data=dataset_name,
+        evaluators=EVALUATORS,
         client=client,
         experiment_prefix=EXPERIMENT_PREFIX,
         max_concurrency=1,
@@ -124,4 +110,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
-    run_experiment(parser.parse_args().namespace)
+    parser.add_argument("--dataset", default=DATASET_NAME)
+    args = parser.parse_args()
+    run_experiment(namespace=args.namespace, dataset_name=args.dataset)

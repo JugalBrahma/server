@@ -1,1 +1,5 @@
 python-interpreter-path = "rag-venv/bin/python"
+
+[errors]
+bad-argument-type = false
+bad-assignment = false

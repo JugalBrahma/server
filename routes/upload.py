@@ -12,17 +12,8 @@ from openai import OpenAI
 from agent.agent import RAGAgent
 from config.firebase import get_current_user_id, get_firestore
 from config.s3 import upload_file_to_s3
-from rag.image_processing import (
-    compress_image,
-    deduplicate_images,
-    get_cached_descriptions,
-)
-from rag.text_processing import (
-    combine_text_and_images,
-    extract_pdf_elements,
-    process_extracted_elements_smart,
-    smart_chunk,
-)
+from rag.ingestion import prepare_chunks
+from rag.text_processing import extract_pdf_elements
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,8 +21,6 @@ db = get_firestore()
 openai_client = OpenAI()
 
 MAX_PAGES = 50
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
 EXTRACTION_METHOD = "rag_pipeline_s3_connected_with_images"
 
 
@@ -72,20 +61,6 @@ def count_pages(elements) -> int:
     return len(pages) or 1
 
 
-def build_chunks(elements) -> list[dict]:
-    text_chunks, image_chunks = process_extracted_elements_smart(elements)
-
-    if image_chunks:
-        images = [
-            {**img, "base64": compress_image(img["base64"])}
-            for img in deduplicate_images(image_chunks)
-        ]
-        descriptions = get_cached_descriptions(images, openai_client)
-        text_chunks = combine_text_and_images(text_chunks, descriptions)
-
-    return smart_chunk(text_chunks, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
-
-
 def upload_to_s3(path: str, key: str) -> None:
     with open(path, "rb") as f:
         result = upload_file_to_s3(file_obj=f, file_key=key)
@@ -122,7 +97,7 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
 
             upload_to_s3(path, s3_key)
 
-        chunks = build_chunks(elements)
+        chunks = prepare_chunks(elements, client=openai_client)
         namespace = get_namespace(user_id, folder_id)
 
         if not RAGAgent(namespace=namespace).add_documents(chunks, s3_key=s3_key):

@@ -1,26 +1,30 @@
-import asyncio
 import logging
 import os
 import re
+import threading
 from pathlib import Path
+
+SERVER_ROOT = Path(__file__).resolve().parent.parent
 
 from dotenv import load_dotenv
 from langsmith import Client, evaluate
+from evaluate.datasets_data import examples as local_examples
 
-from evaluate.ragas import (
-    evaluate_context_precision,
-    evaluate_context_recall,
-    evaluate_faithfulness,
-)
+from evaluate.metrics import EVALUATORS
 
 logger = logging.getLogger(__name__)
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(SERVER_ROOT / ".env")
 
-DATASET_NAME = "A Country Doctor QA Dataset"
-
+DATASET_NAME = os.getenv("DATASET_NAME", "datasets_data")
+STATIC_EXPERIMENT_QUESTIONS = (
+    "Why was the doctor initially unable to travel to his sick patient?",
+    "Where did the doctor unexpectedly find the horses and the groom?",
+    "What violent act did the groom commit against the servant girl, Rosa?",
+)
 _client: Client | None = None
 _cached_examples: list | None = None
+_examples_lock = threading.Lock()
 
 
 def get_client() -> Client | None:
@@ -38,17 +42,67 @@ def get_examples() -> list:
     if _cached_examples is not None:
         return _cached_examples
 
-    client = get_client()
-    if not client:
-        return []
-
-    try:
-        if client.has_dataset(dataset_name=DATASET_NAME):
-            _cached_examples = list(client.list_examples(dataset_name=DATASET_NAME))
+    with _examples_lock:
+        if _cached_examples is not None:
             return _cached_examples
-    except Exception as exc:
-        logger.warning("Error fetching evaluation examples: %s", exc)
-    return []
+
+        client = get_client()
+        if not client:
+            return []
+
+        try:
+            dataset_id = None
+            if not client.has_dataset(dataset_name=DATASET_NAME):
+                dataset = client.create_dataset(
+                    dataset_name=DATASET_NAME,
+                    description="QA Dataset for A Country Doctor",
+                )
+                dataset_id = dataset.id
+                client.create_examples(
+                    inputs=[example["inputs"] for example in local_examples],
+                    outputs=[example["outputs"] for example in local_examples],
+                    dataset_id=dataset.id,
+                )
+
+            all_examples = list(client.list_examples(dataset_name=DATASET_NAME))
+            remote_questions = {
+                _normalize_question(example.inputs.get("question", "")) # type: ignore
+                for example in all_examples
+            }
+            missing_local_examples = [
+                example for example in local_examples
+                if _normalize_question(example["inputs"].get("question", "")) not in remote_questions
+            ]
+            if missing_local_examples:
+                # Keep the remote dataset aligned with the checked-in source list.
+                if all_examples:
+                    dataset_id = all_examples[0].dataset_id
+                elif dataset_id is None:
+                    dataset_id = client.read_dataset(dataset_name=DATASET_NAME).id
+                client.create_examples(
+                    inputs=[example["inputs"] for example in missing_local_examples],
+                    outputs=[example["outputs"] for example in missing_local_examples],
+                    dataset_id=dataset_id,
+                )
+                all_examples = list(client.list_examples(dataset_name=DATASET_NAME))
+
+            # Deduplicate examples by question to avoid redundant iterations.
+            seen_questions = set()
+            _cached_examples = []
+            for example in all_examples:
+                question = _normalize_question(example.inputs.get("question", "")) # type: ignore
+                if question and question not in seen_questions:
+                    seen_questions.add(question)
+                    _cached_examples.append(example)
+            return _cached_examples
+        except Exception as exc:
+            logger.warning("Error fetching evaluation examples: %s", exc)
+            return []
+
+
+def _normalize_question(text: str) -> str:
+    """Normalize case, whitespace, and punctuation for exact question matching."""
+    return " ".join(re.findall(r"\w+", text.casefold()))
 
 
 def _clean_answer(text: str) -> str:
@@ -70,101 +124,61 @@ def _fetch_contexts(query: str, namespace: str) -> list[str]:
         return []
 
 
-def _get_reference(example) -> str:
-    outputs = getattr(example, "outputs", {}) or {}
-    return outputs.get("expected_answer") or outputs.get("reference") or outputs.get("answer") or ""
-
-
-def _eval_faithfulness(run, example) -> dict:
-    question = example.inputs.get("question", "")
-    ans = run.outputs.get("output", "")
-    ctxs = run.outputs.get("retrieved_contexts", [])
-
-    if not ctxs:
-        return {"key": "faithfulness", "score": 0.0}
-
-    try:
-        score = asyncio.run(evaluate_faithfulness(question, ans, ctxs))
-        return {"key": "faithfulness", "score": score}
-    except Exception as exc:
-        logger.warning("Faithfulness evaluation error: %s", exc)
-        return {"key": "faithfulness", "score": 0.0}
-
-
-def _eval_context_precision(run, example) -> dict:
-    question = example.inputs.get("question", "")
-    reference = _get_reference(example)
-    ctxs = run.outputs.get("retrieved_contexts", [])
-
-    if not ctxs or not reference:
-        return {"key": "context_precision", "score": 0.0}
-
-    try:
-        score = asyncio.run(evaluate_context_precision(question, reference, ctxs))
-        return {"key": "context_precision", "score": score}
-    except Exception as exc:
-        logger.warning("Context precision evaluation error: %s", exc)
-        return {"key": "context_precision", "score": 0.0}
-
-
-def _eval_context_recall(run, example) -> dict:
-    question = example.inputs.get("question", "")
-    reference = _get_reference(example)
-    ctxs = run.outputs.get("retrieved_contexts", [])
-
-    if not ctxs or not reference:
-        return {"key": "context_recall", "score": 0.0}
-
-    try:
-        score = asyncio.run(evaluate_context_recall(question, reference, ctxs))
-        return {"key": "context_recall", "score": score}
-    except Exception as exc:
-        logger.warning("Context recall evaluation error: %s", exc)
-        return {"key": "context_recall", "score": 0.0}
-
-
-EVALUATORS = [_eval_faithfulness, _eval_context_precision, _eval_context_recall]
-
-
 def evaluate_flutter_query(
     query_text: str,
-    answer_text: str,
     namespace: str | None = None,
-    retrieved_contexts: list[str] | None = None,
 ):
     client = get_client()
     if not query_text or not client:
         return
 
-    clean_query = query_text.strip().lower()
-    matched = next(
-        (
-            ex for ex in get_examples()
-            if (q := ex.inputs.get("question", "").strip().lower())
-            and (q in clean_query or clean_query in q)
-        ),
-        None,
-    )
-    if not matched:
+    if not namespace:
+        logger.warning("Cannot run the default experiment without a RAG namespace")
         return
 
-    try:
-        contexts = (
-            retrieved_contexts
-            if retrieved_contexts is not None
-            else (_fetch_contexts(query_text, namespace) if namespace else [])
+    dataset_examples = get_examples()
+    static_questions = {_normalize_question(question) for question in STATIC_EXPERIMENT_QUESTIONS}
+    experiment_examples = [
+        example for example in dataset_examples
+        if _normalize_question(example.inputs.get("question", "")) in static_questions
+    ]
+    if len(experiment_examples) != len(STATIC_EXPERIMENT_QUESTIONS):
+        logger.warning(
+            "Default experiment needs %d static questions, but found %d in LangSmith dataset '%s'",
+            len(STATIC_EXPERIMENT_QUESTIONS),
+            len(experiment_examples),
+            DATASET_NAME,
         )
-        answer = _clean_answer(answer_text)
+        return
 
-        logger.info("Evaluating benchmark query: '%s'", query_text)
+    logger.info(
+        "User query '%s' received. Triggering the default %d-question LangSmith experiment.",
+        query_text,
+        len(experiment_examples),
+    )
+
+    try:
+        from agent.agent import RAGAgent
+
+        eval_agent = RAGAgent(namespace=namespace)
+
+        def predict(inputs: dict) -> dict:
+            question = inputs.get("question", "")
+            result = eval_agent.query(user_input=question) # type: ignore
+            contexts = _fetch_contexts(question, namespace)
+            return {
+                "output": _clean_answer(result.get("answer", "")),
+                "retrieved_contexts": contexts,
+            }
+
         results = evaluate(
-            lambda _: {"output": answer, "retrieved_contexts": contexts},
-            data=[matched],
+            predict,
+            data=experiment_examples,
             evaluators=EVALUATORS,
             client=client,
-            experiment_prefix="flutter-ui-eval",
+            experiment_prefix="flutter-default-eval",
             max_concurrency=1,
         )
         logger.info("Evaluation complete: %s", results)
     except Exception as exc:
-        logger.warning("Evaluation failed: %s", exc)
+        logger.exception("Evaluation failed after user query '%s': %s", query_text, exc)

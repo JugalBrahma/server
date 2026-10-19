@@ -9,7 +9,6 @@ import base64
 from collections import defaultdict
 import logging
 import os
-import re
 from typing import Any, Dict, List, Tuple
 
 import fitz  # PyMuPDF
@@ -30,6 +29,7 @@ def extract_pdf_elements(pdf_path: str) -> List[Dict[str, Any]]:
             page = doc[page_index]
             page_num = page_index + 1
 
+            # pyrefly: ignore[missing-attribute]
             text = page.get_text("text").strip()
             if text:
                 extracted_elements.append({
@@ -207,14 +207,3 @@ def smart_chunk(combined_chunks: List[Dict], chunk_size: int = 1000, overlap: in
                     final_chunks.append({**chunk, "content": split})
 
     return final_chunks
-
-
-def clean_text(text: str) -> str:
-    """Clean and normalize raw text content."""
-    if not text:
-        return ""
-    text = re.sub(r"-\s*\n", "", text)
-    text = re.sub(r"\n+", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"[^\x00-\x7F]+", " ", text)
-    return text.strip()

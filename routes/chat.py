@@ -1,14 +1,11 @@
 import logging
 import re
-import threading
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from agent.agent import RAGAgent
 from config.firebase import get_current_user_id
-from evaluate.flutter_evaluator import evaluate_flutter_query
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +14,9 @@ router = APIRouter()
 _agent_cache: dict[str, RAGAgent] = {}
 
 
-class Query(BaseModel):
+class ChatRequest(BaseModel):
     query: str
-    folder_id: Optional[str] = None
+    folder_id: str | None = None
 
 
 def get_agent_for_namespace(namespace: str) -> RAGAgent:
@@ -31,29 +28,24 @@ def get_agent_for_namespace(namespace: str) -> RAGAgent:
 
 @router.post("/agent")
 async def chat_with_agent(
-    query: Query,
+    chat_request: ChatRequest,
     user_id: str = Depends(get_current_user_id),
 ):
     try:
-        namespace = f"user_{user_id}_folder_{query.folder_id}" if query.folder_id else f"user_{user_id}"
+        folder_id = chat_request.folder_id
+        namespace = f"user_{user_id}_folder_{folder_id}" if folder_id else f"user_{user_id}"
         agent = get_agent_for_namespace(namespace)
 
+        # pyrefly: ignore[missing-argument]
         ai_response = agent.query(
-            query.query.strip().lower(),
-            folder_id=query.folder_id,
+            user_input=chat_request.query.strip().lower(),
+            folder_id=folder_id,
             user_id=user_id,
         )
 
         answer = ai_response.get("answer", "")
         doc_refs = re.findall(r"<doc>.*?</doc>", answer)
         has_documents = bool(doc_refs)
-
-        threading.Thread(
-            target=evaluate_flutter_query,
-            args=(query.query, answer),
-            kwargs={"namespace": namespace},
-            daemon=True,
-        ).start()
 
         return {
             "response": ai_response,

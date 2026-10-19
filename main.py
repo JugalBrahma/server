@@ -1,11 +1,21 @@
-from dotenv import load_dotenv
-load_dotenv(override=True)
+import logging
+import os
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import importlib
-import logging
-import config.langsmith
+
+load_dotenv(override=True)
+
+# Configure tracing after loading the environment and before loading the routes.
+import config.langsmith  # noqa: E402
+
+from routes.analytics import router as analytics_router
+from routes.chat import router as chat_router
+from routes.debug_pdf import router as debug_pdf_router
+from routes.delete_pdf import router as delete_pdf_router
+from routes.folders import router as folders_router
+from routes.upload import router as upload_router
 
 app = FastAPI(title="RAG Backend API")
 
@@ -19,34 +29,30 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 
-def include_router_safe(module_path: str, router_name: str = "router", prefix: str | None = None) -> None:
-    try:
-        module = importlib.import_module(module_path)
-        router = getattr(module, router_name)
-        if prefix:
-            app.include_router(router, prefix=prefix)
-        else:
-            app.include_router(router)
-        logging.info("Loaded router: %s", module_path)
-    except Exception as exc:
-        logging.exception("Failed to load router %s: %s", module_path, exc)
+app.include_router(folders_router, prefix="/api")
+app.include_router(upload_router)
+app.include_router(delete_pdf_router)
+# Keep the /agent path because existing clients use it.
+app.include_router(chat_router)
+app.include_router(analytics_router, prefix="/api")
+app.include_router(debug_pdf_router, prefix="/debug")
 
-include_router_safe("routes.folders", prefix="/api")
-include_router_safe("routes.upload")  # Temporarily disabled
-include_router_safe("routes.delete_pdf")
-include_router_safe("routes.agent_fixed")
-include_router_safe("routes.analytics", prefix="/api")
-include_router_safe("routes.debug_pdf", prefix="/debug")
 
 @app.get("/")
 async def root():
     return {"message": "RAG Backend API is running"}
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
+
 if __name__ == "__main__":
-    import uvicorn, os
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    import uvicorn
+
+    # Keep local Flutter development on the same port as ApiConfig, and bind
+    # beyond loopback so physical devices on the LAN can reach the API.
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host=host, port=port, reload=True)

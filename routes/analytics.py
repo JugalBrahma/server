@@ -222,6 +222,7 @@ def _build_traces(chain_runs: List[Any]) -> Tuple[List[Dict], List[Dict]]:
         })
 
     latency_trend = [
+        # pyrefly: ignore[no-matching-overload]
         {"label": f"Q{i+1}", "latency": round(t["latency"], 2), "total_tokens": t["total_tokens"]}
         for i, t in enumerate(reversed(recent_traces[:8]))
     ]

@@ -72,11 +72,11 @@ def build_predict(rag_agent: RAGAgent):
         question = inputs.get("question", "")
         result = rag_agent.query(user_input=question) # type: ignore
 
-        # Ideally use the contexts the agent actually retrieved, e.g.
-        # result["contexts"], if query() can expose them. Fallback below
-        # re-runs retrieval and may not match what the agent saw.
-        docs = rag_agent.config.vector_manager.search(query=question, k=TOP_K)
-        contexts = [d.page_content for d in docs if getattr(d, "page_content", None)]
+        # Use the actual reranked contexts the agent retrieved
+        contexts = result.get("contexts")
+        if not contexts:
+            docs = rag_agent.config.vector_manager.search(query=question, k=TOP_K)
+            contexts = [d.page_content for d in docs if getattr(d, "page_content", None)]
 
         return {
             "output": clean_answer(result.get("answer", "")),

@@ -15,6 +15,7 @@ class LLMManager:
         if model_name:
             kwargs["model"] = model_name
         if temperature is not None:
+            # pyrefly: ignore[unsupported-operation]
             kwargs["temperature"] = temperature
         if provider:
             kwargs["provider"] = provider

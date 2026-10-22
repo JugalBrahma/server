@@ -21,7 +21,7 @@ class LangSmithTokenTracker(BaseCallbackHandler):
 
     def set_current_node(self, node_name: str) -> None:
         if node_name:
-            self.current_node = str(node_name).strip().lower()
+            self.current_node = node_name.strip().lower()
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         """Extract exact token usage from LLM response metadata."""

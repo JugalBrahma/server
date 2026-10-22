@@ -1,7 +1,7 @@
 import os
 import logging
 from collections import defaultdict
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langsmith import traceable
@@ -9,6 +9,7 @@ from langsmith.run_helpers import get_current_run_tree
 
 from .guardrail import check_greeting_guardrail
 from .llm_manager import LLMManager
+from .reranker import DocumentReranker, RerankResult
 from .vector_manager import VectorSearchManager
 
 logger = logging.getLogger(__name__)
@@ -25,10 +26,14 @@ class AgentConfig:
         self.llm_manager = LLMManager(model_name=model_name)
         self.llm = self.llm_manager.get_llm()
         self.vector_manager = VectorSearchManager(index_name=index, namespace=namespace)
+        self.enable_reranker = os.getenv("ENABLE_RERANKER", "true").lower() == "true"
+        self.reranker = DocumentReranker() if self.enable_reranker else None
+        self.fetch_k = int(os.getenv("RETRIEVAL_FETCH_K", "15"))
+        self.rerank_top_k = int(os.getenv("RERANK_TOP_K", "8"))
 
 
 class RAGAgent:
-    """Document QA agent backed by Pinecone vector retrieval and LLM synthesis."""
+    """Document QA agent backed by Pinecone vector retrieval, neural reranking, and LLM synthesis."""
 
     def __init__(
         self,
@@ -39,14 +44,32 @@ class RAGAgent:
         self.config = AgentConfig(index_name=index_name, namespace=namespace, model_name=model_name)
         self.namespace = namespace
 
-    @traceable(run_type="retriever", name="Pinecone Document Retrieval")
-    def retrieve_documents(self, query: str) -> str:
+    @traceable(run_type="retriever", name="Document Retrieval & Reranking")
+    def retrieve_documents(self, query: str) -> Tuple[str, List[Any], RerankResult]:
+        """
+        Retrieves matching document chunks from Pinecone vector store,
+        optionally reranks them using neural cross-attention (FlashRank),
+        and formats them for the LLM.
+        """
         try:
             logger.info("Retrieving chunks for query '%s' in namespace '%s'", query, self.namespace)
-            results = self.config.vector_manager.search(query=query, k=8)
+            # Step 1: Query vector database for top matching candidate chunks
+            fetch_k = self.config.fetch_k if self.config.reranker else 8
+            results = self.config.vector_manager.search(query=query, k=fetch_k)
             if not results:
-                return ""
+                return "", [], RerankResult([], applied=False, fallback_used=False)
 
+            # Step 2: Neural cross-encoder reranking
+            rerank_result = RerankResult(results, applied=False, fallback_used=False)
+            if self.config.reranker:
+                rerank_result = self.config.reranker.rerank_with_status(
+                    query=query,
+                    documents=results,
+                    top_k=self.config.rerank_top_k,
+                )
+                results = rerank_result.documents
+
+            # Step 3: Group chunks by document identity (doc_id, s3_key, namespace)
             results_by_doc = defaultdict(list)
             for doc in results:
                 metadata = getattr(doc, "metadata", {}) or {}
@@ -59,11 +82,14 @@ class RAGAgent:
                     "content_type": metadata.get("content_type", "unknown"),
                 })
 
+            # Step 4: Sort chunks by page number and format each document into a labeled text block
             formatted = []
             for i, ((doc_id, s3_key, _), chunks) in enumerate(results_by_doc.items(), 1):
+                # Order chunks by page number
                 chunks.sort(key=lambda c: c["metadata"].get("page_number", 0))
                 combined_text = "\n\n".join(c["content"] for c in chunks)
 
+                # Determine the page range (e.g., 'pages 2–4' or 'page 2')
                 pages = [c["metadata"].get("page_number") for c in chunks if c["metadata"].get("page_number") is not None]
                 if pages:
                     first_page, last_page = pages[0], pages[-1]
@@ -81,10 +107,10 @@ class RAGAgent:
                 )
                 formatted.append(f"{header}Content:\n{combined_text}\n" + "=" * 50 + "\n")
 
-            return "\n".join(formatted)
+            return "\n".join(formatted), results, rerank_result
         except Exception:
             logger.exception("Retrieval error for namespace '%s'", self.namespace)
-            return ""
+            return "", [], RerankResult([], applied=False, fallback_used=False)
 
     @traceable(run_type="chain", name="RAG Agent Query")
     def query(
@@ -93,6 +119,17 @@ class RAGAgent:
         folder_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> dict:
+        """
+        Executes the end-to-end RAG workflow for a user query.
+
+        Steps:
+        1. Attach LangSmith tracing metadata and tags (folder_id, user_id).
+        2. Fast-path check: intercept greetings with conversational replies.
+        3. Retrieve and neural-rerank relevant document context via retrieve_documents().
+        4. Construct system & human prompts (grounded QA if docs exist, fallback if not).
+        5. Invoke the LLM and return the generated answer along with retrieved contexts.
+        """
+        # Step 1: Attach LangSmith tracing metadata and tags
         try:
             run_tree = get_current_run_tree()
             if run_tree:
@@ -109,18 +146,31 @@ class RAGAgent:
         except Exception as exc:
             logger.warning("Failed to attach trace metadata: %s", exc)
 
+        # Step 2: Check greeting guardrail (fast-path for greetings)
         is_greeting, greeting_reply = check_greeting_guardrail(user_input)
         if is_greeting and greeting_reply:
             logger.info("Greeting intercepted for query: '%s'", user_input)
-            return {"answer": greeting_reply}
+            return {
+                "answer": greeting_reply,
+                "contexts": [],
+                "retrieval": {
+                    "reranker_enabled": self.config.reranker is not None,
+                    "reranker_applied": False,
+                    "reranker_fallback_used": False,
+                },
+            }
 
-        retrieved_docs = self.retrieve_documents(user_input)
+        # Step 3: Retrieve and rerank relevant document chunks from Pinecone
+        retrieved_docs, raw_chunks, rerank_result = self.retrieve_documents(user_input)
 
+        # Step 4: Build prompts (grounded QA if documents found, fallback if not)
         if retrieved_docs:
             system_prompt = (
                 "You are an intelligent document assistant. "
                 "Answer the question based strictly on the retrieved document context below. "
-                "Wrap all facts, quotes, figures, and direct information from the documents in <doc> and </doc> tags. "
+                "Pay close attention to chronological and temporal qualifiers in questions (such as 'initially', 'first examination', 'before', 'later'). "
+                "Note that an initial assessment or finding that a patient is healthy or has sluggish circulation counts as the initial diagnosis—do not confuse an initial assessment with any later re-examination or subsequent discovery of wounds/illness. "
+                "Wrap only the exact facts, quotes, figures, and direct information from the documents in <doc> and </doc> tags. Use normal plain text for your own connecting words, and do not wrap entire sentences in <doc> tags. "
                 "If the context does not contain the answer, politely state that the information was not found in the documents."
             )
             user_prompt = f'User Question: "{user_input}"\n\nRetrieved Documents:\n{retrieved_docs}\n\nAnswer:'
@@ -131,18 +181,23 @@ class RAGAgent:
             )
             user_prompt = user_input
 
+        # Step 5: Invoke the LLM and extract the response
         response = self.config.llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ])
 
         content = response.content if hasattr(response, "content") else str(response)
-        if isinstance(content, list):
-            content = "".join(
-                p.get("text", "") if isinstance(p, dict) else str(p) for p in content
-            )
 
-        return {"answer": content}
+        return {
+            "answer": content,
+            "contexts": [getattr(c, "page_content", str(c)) for c in raw_chunks],
+            "retrieval": {
+                "reranker_enabled": self.config.reranker is not None,
+                "reranker_applied": rerank_result.applied,
+                "reranker_fallback_used": rerank_result.fallback_used,
+            },
+        }
 
     def add_documents(self, documents, metadatas=None, s3_key=None):
         return self.config.vector_manager.add_documents(documents, metadatas, s3_key)

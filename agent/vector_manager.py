@@ -7,20 +7,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_community.retrievers import PineconeHybridSearchRetriever
-from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
+from config.models import DEFAULT_EMBEDDING_DIM, get_embeddings
 from pinecone import Pinecone, ServerlessSpec
 from pinecone_text.sparse import BM25Encoder
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
 DENSE_DEFAULT_K = 2
 MIN_CHUNK_CHARS = 10
 MAX_METADATA_BYTES = 35_000  # Pinecone limit is 40KB
 MAX_LIST_METADATA = 10
-KEPT_METADATA_KEYS = ("page_number", "languages")
+KEPT_METADATA_KEYS = ("page_number", "page", "pages", "languages")
 
 
 # ---------------------------------------------------------------- config
@@ -158,7 +156,7 @@ def _is_noise(content: str) -> bool:
 
 
 def _safe_metadata(raw: Dict) -> Dict:
-    out = {}
+    out: Dict[str, Any] = {}
     for key in KEPT_METADATA_KEYS:
         if key not in raw:
             continue
@@ -215,7 +213,7 @@ class VectorSearchManager:
         self.index = self.pc.Index(self.index_name)
         self.metric = self._read_metric()
 
-        self.embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, dimensions=EMBEDDING_DIM)
+        self.embeddings = get_embeddings()
         self.vector_store = PineconeVectorStore.from_existing_index(
             index_name=self.index_name, embedding=self.embeddings, namespace=namespace
         )
@@ -243,7 +241,7 @@ class VectorSearchManager:
         logger.warning("Index '%s' not found. Creating (%s).", self.index_name, metric)
         self.pc.create_index(
             name=self.index_name,
-            dimension=EMBEDDING_DIM,
+            dimension=DEFAULT_EMBEDDING_DIM,
             metric=metric,
             spec=ServerlessSpec(cloud="aws", region=self.config.region),
         )
@@ -257,6 +255,8 @@ class VectorSearchManager:
 
     def _refresh_retriever(self) -> None:
         """(Re)build the hybrid retriever so it picks up the latest BM25 encoder."""
+        if not self.bm25:
+            return
         try:
             self.retriever = PineconeHybridSearchRetriever(
                 embeddings=self.embeddings,
@@ -356,7 +356,7 @@ class VectorSearchManager:
             return {
                 "index_name": self.index_name,
                 "namespace": self.namespace,
-                "dimension": EMBEDDING_DIM,
+                "dimension": DEFAULT_EMBEDDING_DIM,
                 "metric": self.metric,
                 "vector_count": stats.get("total_vector_count", 0),
                 "namespaces": stats.get("namespaces", {}),

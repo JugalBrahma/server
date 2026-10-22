@@ -34,4 +34,4 @@ def prepare_chunks(elements: List[Dict], client=None, use_cache: bool = True) ->
         descriptions = describe_images_batch(images, client)
 
     combined_chunks = combine_text_and_images(text_chunks, descriptions)
-    return smart_chunk(combined_chunks, chunk_size=1000, overlap=200)
+    return smart_chunk(combined_chunks, chunk_size=1500, overlap=300)

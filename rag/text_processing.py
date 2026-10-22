@@ -64,17 +64,23 @@ def extract_pdf_elements(pdf_path: str) -> List[Dict[str, Any]]:
         return []
 
 
-def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict], List[Dict]]:
+def process_extracted_elements_smart(
+    raw_elements: List[Any],
+    chunk_size: int = 1500,
+    chunk_overlap: int = 300,
+) -> Tuple[List[Dict], List[Dict]]:
     """Split text into manageable chunks and prepare image base64 payloads."""
     text_chunks: List[Dict] = []
     image_chunks: List[Dict] = []
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", ". ", " ", ""],
         length_function=len,
     )
+
+    text_elements: List[Dict[str, Any]] = []
 
     for element in raw_elements:
         if not isinstance(element, dict):
@@ -92,19 +98,7 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
                     continue
                 if not any(ch.isalpha() for ch in text) and len(text) < 15:
                     continue
-
-                chunks = splitter.split_text(text)
-                for i, chunk in enumerate(chunks):
-                    if len(chunk.strip()) > 10:
-                        text_chunks.append({
-                            "type": "Text",
-                            "content": chunk.lower(),
-                            "metadata": {
-                                "page": page,
-                                "chunk_index": i,
-                                "element_id": f"text_{page}_{i}",
-                            },
-                        })
+                text_elements.append(element)
 
             elif element_type == "image":
                 image_path = element.get("image_path", "")
@@ -116,12 +110,68 @@ def process_extracted_elements_smart(raw_elements: List[Any]) -> Tuple[List[Dict
                         "type": "Image",
                         "image_path": image_path,
                         "base64": image_base64,
-                        "metadata": {"page": page},
+                        "metadata": {"page": page, "page_number": page},
                     })
 
         except Exception as e:
             logger.warning("Error processing %s element on page %s: %s", element_type, page, e)
             continue
+
+    if text_elements:
+        text_elements.sort(key=lambda el: el.get("page", 1))
+
+        doc_parts = []
+        page_spans = []  # (start_char, end_char, page_num)
+        current_offset = 0
+
+        for el in text_elements:
+            page_text = el.get("text", "").strip()
+            page_num = el.get("page", 1)
+
+            start = current_offset
+            doc_parts.append(page_text)
+            current_offset += len(page_text)
+            end = current_offset
+            page_spans.append((start, end, page_num))
+
+            doc_parts.append("\n\n")
+            current_offset += 2
+
+        full_text = "".join(doc_parts)
+        split_texts = splitter.split_text(full_text)
+
+        search_cursor = 0
+        for i, chunk in enumerate(split_texts):
+            clean_chunk = chunk.strip()
+            if len(clean_chunk) <= 10:
+                continue
+
+            chunk_start = full_text.find(chunk, search_cursor)
+            if chunk_start == -1:
+                chunk_start = full_text.find(chunk)
+
+            chunk_end = chunk_start + len(chunk) if chunk_start != -1 else 0
+            if chunk_start != -1:
+                search_cursor = chunk_start
+
+            chunk_pages = [
+                p_num
+                for p_start, p_end, p_num in page_spans
+                if not (chunk_end <= p_start or chunk_start >= p_end)
+            ]
+            primary_page = chunk_pages[0] if chunk_pages else 1
+
+            text_chunks.append({
+                "type": "Text",
+                "content": clean_chunk.lower(),
+                "metadata": {
+                    "page": primary_page,
+                    "page_number": primary_page,
+                    "pages": chunk_pages or [primary_page],
+                    "chunk_index": i,
+                    "element_id": f"text_{primary_page}_{i}",
+                },
+            })
 
     return text_chunks, image_chunks
 
@@ -181,7 +231,7 @@ def combine_text_and_images(text_chunks: List[Dict], image_descriptions: List[Di
     return combined_chunks
 
 
-def smart_chunk(combined_chunks: List[Dict], chunk_size: int = 1000, overlap: int = 200) -> List[Dict]:
+def smart_chunk(combined_chunks: List[Dict], chunk_size: int = 1500, overlap: int = 300) -> List[Dict]:
     """Split oversized text chunks while keeping image-enriched chunks together."""
     final_chunks: List[Dict] = []
     splitter = RecursiveCharacterTextSplitter(
@@ -198,7 +248,7 @@ def smart_chunk(combined_chunks: List[Dict], chunk_size: int = 1000, overlap: in
             chunk["metadata"] = {k: v for k, v in chunk["metadata"].items() if k not in unwanted_keys}
 
         content = chunk.get("content", "")
-        if chunk.get("has_image") or len(content) < chunk_size:
+        if chunk.get("has_image") or len(content) <= chunk_size:
             if len(content.strip()) > 10:
                 final_chunks.append(chunk)
         else:

@@ -16,6 +16,7 @@ from routes.debug_pdf import router as debug_pdf_router
 from routes.delete_pdf import router as delete_pdf_router
 from routes.folders import router as folders_router
 from routes.upload import router as upload_router
+from agent.reranker import DocumentReranker
 
 app = FastAPI(title="RAG Backend API")
 
@@ -36,6 +37,19 @@ app.include_router(delete_pdf_router)
 app.include_router(chat_router)
 app.include_router(analytics_router, prefix="/api")
 app.include_router(debug_pdf_router, prefix="/debug")
+
+
+@app.on_event("startup")
+def warm_reranker() -> None:
+    """Avoid loading or downloading the FlashRank model during a user query."""
+    if os.getenv("ENABLE_RERANKER", "true").lower() != "true":
+        return
+    try:
+        DocumentReranker().warm()
+        logging.getLogger(__name__).info("FlashRank reranker warmed successfully")
+    except Exception:
+        # Keep the API available; each answer exposes a reranker fallback if it occurs.
+        logging.getLogger(__name__).exception("FlashRank warm-up failed")
 
 
 @app.get("/")

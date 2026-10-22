@@ -165,7 +165,7 @@ def evaluate_flutter_query(
         def predict(inputs: dict) -> dict:
             question = inputs.get("question", "")
             result = eval_agent.query(user_input=question) # type: ignore
-            contexts = _fetch_contexts(question, namespace)
+            contexts = result.get("contexts") or _fetch_contexts(question, namespace)
             return {
                 "output": _clean_answer(result.get("answer", "")),
                 "retrieved_contexts": contexts,

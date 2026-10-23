@@ -67,15 +67,27 @@ def ensure_dataset(client: Client) -> None:
     logger.info("Uploaded %d examples", len(examples))
 
 
-def build_predict(rag_agent: RAGAgent):
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected, e.g. true or false.")
+
+
+def build_predict(rag_agent: RAGAgent, enable_reranker: bool = True):
     def predict(inputs: dict) -> dict:
         question = inputs.get("question", "")
-        result = rag_agent.query(user_input=question) # type: ignore
+        result = rag_agent.query(user_input=question, enable_reranker=enable_reranker) # type: ignore
 
         # Use the actual reranked contexts the agent retrieved
         contexts = result.get("contexts")
         if not contexts:
-            docs = rag_agent.config.vector_manager.search(query=question, k=TOP_K)
+            top_k = rag_agent.config.rerank_top_k if not enable_reranker else TOP_K
+            docs = rag_agent.config.vector_manager.search(query=question, k=top_k)
             contexts = [d.page_content for d in docs if getattr(d, "page_content", None)]
 
         return {
@@ -86,20 +98,33 @@ def build_predict(rag_agent: RAGAgent):
     return predict
 
 
-def run_experiment(namespace: str = DEFAULT_NAMESPACE, dataset_name: str = DATASET_NAME):
+def run_experiment(
+    namespace: str = DEFAULT_NAMESPACE,
+    dataset_name: str = DATASET_NAME,
+    enable_reranker: bool = True,
+):
     if not namespace:
         raise ValueError("Provide a namespace via --namespace or EVAL_NAMESPACE")
 
     client = Client()
     ensure_dataset(client)
 
-    logger.info("Starting evaluation for '%s'", dataset_name)
+    rerank_suffix = "rerank-true" if enable_reranker else "rerank-false"
+    experiment_prefix = f"{EXPERIMENT_PREFIX}-{rerank_suffix}"
+
+    logger.info(
+        "Starting evaluation for '%s' (reranker=%s, prefix=%s)",
+        dataset_name,
+        enable_reranker,
+        experiment_prefix,
+    )
+    rag_agent = RAGAgent(namespace=namespace, enable_reranker=enable_reranker)
     results = evaluate(
-        build_predict(RAGAgent(namespace=namespace)),
+        build_predict(rag_agent, enable_reranker=enable_reranker),
         data=dataset_name,
         evaluators=EVALUATORS,
         client=client,
-        experiment_prefix=EXPERIMENT_PREFIX,
+        experiment_prefix=experiment_prefix,
         max_concurrency=1,
     )
     logger.info("Finished: %s", results)
@@ -108,8 +133,20 @@ def run_experiment(namespace: str = DEFAULT_NAMESPACE, dataset_name: str = DATAS
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Evaluate RAG pipeline on dataset")
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     parser.add_argument("--dataset", default=DATASET_NAME)
+    parser.add_argument(
+        "--reranker",
+        type=str2bool,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Enable or disable neural reranker: --reranker true or --reranker false (default: true)",
+    )
     args = parser.parse_args()
-    run_experiment(namespace=args.namespace, dataset_name=args.dataset)
+    run_experiment(
+        namespace=args.namespace,
+        dataset_name=args.dataset,
+        enable_reranker=args.reranker,
+    )

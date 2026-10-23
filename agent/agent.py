@@ -21,12 +21,16 @@ class AgentConfig:
         index_name: Optional[str] = None,
         namespace: str = "test-2",
         model_name: Optional[str] = None,
+        enable_reranker: Optional[bool] = None,
     ):
         index = index_name or os.getenv("PINECONE_INDEX_NAME") or os.getenv("AGENT_INDEX_NAME", "askadocument")
         self.llm_manager = LLMManager(model_name=model_name)
         self.llm = self.llm_manager.get_llm()
         self.vector_manager = VectorSearchManager(index_name=index, namespace=namespace)
-        self.enable_reranker = os.getenv("ENABLE_RERANKER", "true").lower() == "true"
+        if enable_reranker is not None:
+            self.enable_reranker = enable_reranker
+        else:
+            self.enable_reranker = os.getenv("ENABLE_RERANKER", "true").lower() == "true"
         self.reranker = DocumentReranker() if self.enable_reranker else None
         self.fetch_k = int(os.getenv("RETRIEVAL_FETCH_K", "15"))
         self.rerank_top_k = int(os.getenv("RERANK_TOP_K", "8"))
@@ -40,12 +44,22 @@ class RAGAgent:
         index_name: Optional[str] = None,
         namespace: str = "test-2",
         model_name: Optional[str] = None,
+        enable_reranker: Optional[bool] = None,
     ):
-        self.config = AgentConfig(index_name=index_name, namespace=namespace, model_name=model_name)
+        self.config = AgentConfig(
+            index_name=index_name,
+            namespace=namespace,
+            model_name=model_name,
+            enable_reranker=enable_reranker,
+        )
         self.namespace = namespace
 
     @traceable(run_type="retriever", name="Document Retrieval & Reranking")
-    def retrieve_documents(self, query: str) -> Tuple[str, List[Any], RerankResult]:
+    def retrieve_documents(
+        self,
+        query: str,
+        enable_reranker: Optional[bool] = None,
+    ) -> Tuple[str, List[Any], RerankResult]:
         """
         Retrieves matching document chunks from Pinecone vector store,
         optionally reranks them using neural cross-attention (FlashRank),
@@ -53,21 +67,29 @@ class RAGAgent:
         """
         try:
             logger.info("Retrieving chunks for query '%s' in namespace '%s'", query, self.namespace)
+            reranker = (
+                self.config.reranker
+                if enable_reranker is None
+                else (self.config.reranker if enable_reranker else None)
+            )
+
             # Step 1: Query vector database for top matching candidate chunks
-            fetch_k = self.config.fetch_k if self.config.reranker else 8
+            fetch_k = self.config.fetch_k if reranker else self.config.rerank_top_k
             results = self.config.vector_manager.search(query=query, k=fetch_k)
             if not results:
                 return "", [], RerankResult([], applied=False, fallback_used=False)
 
             # Step 2: Neural cross-encoder reranking
-            rerank_result = RerankResult(results, applied=False, fallback_used=False)
-            if self.config.reranker:
-                rerank_result = self.config.reranker.rerank_with_status(
+            if reranker:
+                rerank_result = reranker.rerank_with_status(
                     query=query,
                     documents=results,
                     top_k=self.config.rerank_top_k,
                 )
                 results = rerank_result.documents
+            else:
+                results = results[:self.config.rerank_top_k]
+                rerank_result = RerankResult(results, applied=False, fallback_used=False)
 
             # Step 3: Group chunks by document identity (doc_id, s3_key, namespace)
             results_by_doc = defaultdict(list)
@@ -118,6 +140,7 @@ class RAGAgent:
         user_input: str,
         folder_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        enable_reranker: Optional[bool] = None,
     ) -> dict:
         """
         Executes the end-to-end RAG workflow for a user query.
@@ -148,20 +171,29 @@ class RAGAgent:
 
         # Step 2: Check greeting guardrail (fast-path for greetings)
         is_greeting, greeting_reply = check_greeting_guardrail(user_input)
+        reranker_is_active = (
+            self.config.reranker is not None
+            if enable_reranker is None
+            else (self.config.reranker is not None and enable_reranker)
+        )
+
         if is_greeting and greeting_reply:
             logger.info("Greeting intercepted for query: '%s'", user_input)
             return {
                 "answer": greeting_reply,
                 "contexts": [],
                 "retrieval": {
-                    "reranker_enabled": self.config.reranker is not None,
+                    "reranker_enabled": reranker_is_active,
                     "reranker_applied": False,
                     "reranker_fallback_used": False,
                 },
             }
 
         # Step 3: Retrieve and rerank relevant document chunks from Pinecone
-        retrieved_docs, raw_chunks, rerank_result = self.retrieve_documents(user_input)
+        retrieved_docs, raw_chunks, rerank_result = self.retrieve_documents(
+            user_input,
+            enable_reranker=enable_reranker,
+        )
 
         # Step 4: Build prompts (grounded QA if documents found, fallback if not)
         if retrieved_docs:
@@ -193,7 +225,7 @@ class RAGAgent:
             "answer": content,
             "contexts": [getattr(c, "page_content", str(c)) for c in raw_chunks],
             "retrieval": {
-                "reranker_enabled": self.config.reranker is not None,
+                "reranker_enabled": reranker_is_active,
                 "reranker_applied": rerank_result.applied,
                 "reranker_fallback_used": rerank_result.fallback_used,
             },

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ----------------------------------------------------
-# 🔍 LangSmith Global Tracing Configuration
+# LangSmith Global Tracing Configuration
 # ----------------------------------------------------
 os.environ["LANGSMITH_TRACING"] = os.getenv("LANGSMITH_TRACING", "true")
 os.environ["LANGSMITH_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "fusion-chat")

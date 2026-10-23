@@ -17,6 +17,7 @@ _agent_cache: dict[str, RAGAgent] = {}
 class ChatRequest(BaseModel):
     query: str
     folder_id: str | None = None
+    enable_reranker: bool | None = None
 
 
 def get_agent_for_namespace(namespace: str) -> RAGAgent:
@@ -41,6 +42,7 @@ async def chat_with_agent(
             user_input=chat_request.query.strip().lower(),
             folder_id=folder_id,
             user_id=user_id,
+            enable_reranker=chat_request.enable_reranker,
         )
 
         answer = ai_response.get("answer", "")

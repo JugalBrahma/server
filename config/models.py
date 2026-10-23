@@ -13,6 +13,7 @@ DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
 DEFAULT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.7"))
 DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").lower()
+DEFAULT_RAGAS_EVAL_MODEL = os.getenv("RAGAS_EVAL_MODEL", "deepseek/deepseek-chat")
 
 
 # def get_groq_llm(
@@ -115,4 +116,27 @@ def get_embeddings(
     return get_openrouter_embeddings(model=model, dimensions=dimensions, **kwargs)
 
 
+# ---------------------------------------------------------------- ragas evaluation
 
+
+def get_ragas_evaluator_llm(
+    model: str | None = None,
+    temperature: float = 0.0,
+    **kwargs,
+):
+    """Returns the dedicated evaluator LLM for Ragas benchmarks via OpenRouter."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY environment variable is required")
+
+    from ragas.llms import LangchainLLMWrapper
+
+    selected_model = model or DEFAULT_RAGAS_EVAL_MODEL
+    llm = ChatOpenAI(
+        model=selected_model,
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        temperature=temperature,
+        **kwargs,
+    )
+    return LangchainLLMWrapper(langchain_llm=llm)

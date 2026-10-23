@@ -2,7 +2,7 @@
 
 > Upload PDFs, ask questions, and get accurate answers with page-level citations and original figures and tables.
 
-**Faithfulness 0.94 · Context precision 0.91 · p95 latency 1.8s · ~$0.003 per query**
+**Faithfulness 0.95 · Context precision 0.61 · Correctness 0.91 · p50 latency 10.2s · ~$0.003 per query**
 
 [Architecture](#architecture) · [Results](#results) · [Key design decisions](#key-design-decisions) · [Evaluation method](#evaluation-method) · [Tech stack](#tech-stack)
 
@@ -25,32 +25,36 @@ Standard vector search frequently retrieves text passages that share keywords wi
 
 ## Results
 
-Evaluated on domain question-answer benchmark pairs across complex source documents ([how the dataset was built](#evaluation-method)).
+Evaluated on **7 benchmark question-answer pairs** built from **A Country Doctor** ([how the dataset was built](#evaluation-method)) and logged via **LangSmith**.
 
-### Answer quality (Ragas)
+### Answer quality (Ragas & Correctness)
 
-| Setup | Faithfulness | Context Precision | Context Recall |
-|---|---|---|---|
-| Vector search only (top 8) | 0.81 | 0.74 | 0.79 |
-| **+ FlashRank rerank (15 → 8)** | **0.94** | **0.91** | **0.88** |
+| Setup | Faithfulness | Context Precision | Context Recall | Correctness |
+|---|---|---|---|---|
+| Vector search only (`rerank-false`) | 0.915 | 0.487 | 0.667 | 0.800 |
+| **+ FlashRank rerank (`rerank-true`)** | **0.954** | **0.613** | **0.857 – 1.000** | **0.906** |
 
-> **Takeaway:** Cross-encoder reranking boosted Context Precision by **+17%**, ensuring that the most relevant factual context was placed at the top of the context window, directly reducing hallucination rates and raising Faithfulness to **0.94**.
+> **Key takeaway from actual runs:** Adding FlashRank neural reranking improved **Context Precision from 0.487 to 0.613 (+25.9%)** and **Context Recall from 0.667 to 0.857–1.000 (+28.5% to +50%)**, leading directly to higher answer **Correctness (0.906 vs 0.800)** and **Faithfulness (0.954 vs 0.915)**.
 
-### Latency (50 queries, production server)
+### Latency (Logged from benchmark runs)
 
-| Stage | p50 | p95 |
+| Stage | Typical / p50 | p95 |
 |---|---|---|
-| Query embedding | 45 ms | 70 ms |
-| Pinecone vector retrieval | 85 ms | 130 ms |
-| FlashRank local rerank (15 passages) | 18 ms | 28 ms |
-| Time to first token (TTFT) | 380 ms | 620 ms |
-| **End to end** | **1.2 s** | **1.8 s** |
+| Pinecone Hybrid / Dense Retrieval | 1.69 s | 1.73 s |
+| FlashRank Local Rerank & Context Assembly | 0.85 s | 0.96 s |
+| Generation & Reasoning (LLM) | 4.36 s | 6.01 s |
+| **End to End Pipeline** | **10.22 s** | **19.27 s** |
 
-### Cost per query
+*Note: Latency includes extended reasoning/thinking traces before delivering the final answer.*
 
-| Avg prompt tokens | Avg completion tokens | Est. cost per query |
-|---|---|---|
-| ~1,850 | ~240 | ~$0.003 |
+### Token consumption & Cost per query
+
+| Metric | Measured Value |
+|---|---|
+| **Avg Prompt Tokens** | 3,500 tokens |
+| **Avg Completion Tokens** | 1,060 tokens |
+| **Avg Total Tokens** | 4,561 tokens |
+| **Est. Cost per Query** | ~$0.003 – $0.005 |
 
 ---
 
@@ -80,21 +84,22 @@ flowchart LR
 
 | Decision | Why | Trade-off |
 |---|---|---|
-| **Retrieve 15, rerank to 8** | Optimal balance: broad initial recall without polluting the LLM's prompt context with marginal chunks. | Adds ~20 ms of local cross-encoder inference. |
-| **FlashRank (local ONNX) over hosted reranking API** | Zero network hops, no per-call API cost, and sub-30ms execution with process-wide model warming at startup. | Slightly smaller parameter model than massive cloud-hosted cross-encoders. |
-| **Per-user & per-folder namespaces** | Hard multi-tenant boundary preventing accidental cross-folder or cross-user context leakage; simplifies cascading deletes. | Requires namespace indexing and management per directory hierarchy. |
-| **Direct S3 streaming during parsing** | Minimizes local disk I/O and stateless container storage in cloud container environments. | Requires reliable network bandwidth between ingestion worker and S3 bucket. |
+| **Retrieve 15, rerank to 8** | Maximizes recall without polluting the LLM's prompt context with marginal chunks. | Adds local cross-encoder scoring overhead. |
+| **FlashRank (local ONNX) over hosted reranking API** | Zero network hops, no per-call API cost, and process-wide model warming at server startup. | Operates on a compact cross-encoder model compared to large hosted endpoints. |
+| **Per-user & per-folder namespaces** | Hard multi-tenant boundary preventing cross-folder or cross-user context leakage; enables clean cascading deletes. | Requires namespace indexing and management per directory hierarchy. |
+| **Direct S3 streaming during parsing** | Minimizes local disk I/O and keeps container storage stateless in deployment. | Requires reliable network bandwidth between ingestion worker and S3 bucket. |
 
 ---
 
 ## Evaluation method
 
-- **Benchmark Dataset:** Domain Q&A pairs constructed to test needle-in-a-haystack recall, multi-paragraph synthesis, and technical figure comprehension.
+- **Benchmark Dataset:** 7 domain question-answer pairs (`evaluate/datasets_data.py`) constructed from *A Country Doctor* targeting specific factual constraints (locations, actions, physical descriptions, character reactions).
 - **Evaluation Framework:** Automated testing via **Ragas** measuring:
   - **Faithfulness:** Verifies that claims in the output strictly derive from the retrieved contexts.
   - **Context Precision:** Checks whether relevant passages are ranked higher than irrelevant ones.
   - **Context Recall:** Validates whether all ground-truth facts are captured in the retrieved candidate set.
-- **Observability:** Evaluator execution runs are piped directly to **LangSmith**, tracking score distributions and regressions across codebase revisions.
+  - **Correctness:** Evaluates semantic agreement with the ground truth answer.
+- **Observability & Traceability:** All experiment runs are logged directly to **LangSmith** under experiment prefixes `country-doctor-eval-rerank-true-*` and `country-doctor-eval-rerank-false-*` for regression and distribution tracking.
 
 ---
 
@@ -102,7 +107,7 @@ flowchart LR
 
 - **Scanned or Image-Only PDFs:** OCR fallback pipeline is slower than native PyMuPDF stream parsing.
 - **Cross-Document Reasoning:** Queries requiring synthesis across dozens of distinct PDFs simultaneously may require larger retrieval windows or map-reduce patterns.
-- **Complex Tables without Lines:** Borderless financial tables require enhanced heuristic table recognition to preserve cell relationships.
+- **Complex Borderless Tables:** Borderless financial tables require enhanced heuristic table recognition to preserve cell relationships.
 
 ---
 

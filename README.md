@@ -62,8 +62,8 @@ Evaluated on **7 benchmark question-answer pairs** built from **A Country Doctor
 
 ```mermaid
 flowchart TD
-    App[Flutter App] <-->|1. Authenticate| Auth[Firebase Auth]
-    App -->|2. API Requests| API[FastAPI Backend]
+    App[Flutter App] -->|1. Authenticate| Auth[Firebase Auth]
+    Auth -->|2. Authenticated Requests| API[FastAPI Backend]
 
     subgraph Flows [Core Pipelines]
         Storing[Storing Pipeline\nPDF Ingestion & Chunking]
@@ -81,7 +81,7 @@ flowchart TD
     Storing -->|Vectors| Pinecone
     Storing -->|Metadata| Firestore
 
-    API <-->|Query & Answer| Chatting
+    API -->|Query| Chatting
     Chatting -->|Search| Pinecone
     Chatting <-->|Messages| Firestore
     Chatting -.->|Tracing| LangSmith[LangSmith]
@@ -89,13 +89,15 @@ flowchart TD
     API -->|3. Response| App
 ```
 
-- **Auth Layer (`Firebase Auth`):** Secures client access with ID tokens verified by FastAPI on each request for multi-tenant isolation.
-- **Data & Storage Layer:**
-  - **Cloud Firestore:** Application database storing user folders, PDF metadata, and chat history.
-  - **AWS S3:** Object store holding original uploaded PDFs and extracted figures.
-  - **Pinecone:** Vector database storing chunk embeddings partitioned into per-user and per-folder namespaces.
-- **Storing Flow (Ingestion):** Client uploads a PDF $\rightarrow$ FastAPI saves raw file to S3, extracts & chunks content with PyMuPDF, indexes vectors in Pinecone, and writes document metadata into Firestore.
-- **Chatting Flow (RAG):** Client asks a question $\rightarrow$ FastAPI retrieves top candidates from Pinecone, reranks with FlashRank cross-encoder, generates grounded citations with an LLM, and syncs conversation history in Firestore.
+- **1. Client (`Flutter App`):** User interface for document management and conversational Q&A.
+- **2. Auth Layer (`Firebase Auth`):** Authenticates users first and attaches verified ID tokens to all requests.
+- **3. Backend API (`FastAPI`):** Validates the Firebase token, enforces user/folder isolation, and orchestrates pipelines.
+- **4. Storing Flow (Ingestion):** Saves original PDF to **AWS S3**, chunks content with **PyMuPDF**, indexes vectors in **Pinecone**, and records document metadata in **Cloud Firestore**.
+- **5. Chatting Flow (RAG):** Retrieves top chunks from **Pinecone**, reranks with **FlashRank**, generates answers with LLM, and persists conversation messages in **Cloud Firestore**.
+- **Storage Layer:**
+  - **Cloud Firestore:** Document metadata, folder hierarchy, and chat history.
+  - **AWS S3:** Raw PDF files and visual assets.
+  - **Pinecone:** Isolated vector embeddings (`user_{id}_folder_{id}`).
 
 
 ---

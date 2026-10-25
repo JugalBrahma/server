@@ -62,42 +62,40 @@ Evaluated on **7 benchmark question-answer pairs** built from **A Country Doctor
 
 ```mermaid
 flowchart TD
-    App[Flutter App] -->|1. Authenticate| Auth[Firebase Auth]
-    Auth -->|2. Authenticated Requests| API[FastAPI Backend]
+    App[Flutter App] --> Auth[Firebase Auth]
+    Auth --> UI[Interface UI]
+    UI --> Folder[Create Folder]
 
-    subgraph Flows [Core Pipelines]
-        Storing[Storing Pipeline\nPDF Ingestion & Chunking]
-        Chatting[Chatting Pipeline\nRAG & FlashRank Rerank]
-    end
+    %% Three Main Workflows
+    Folder --> Chat[Chat]
+    Folder --> Analytics[Analytics]
+    Folder --> Upload[File Upload]
 
-    subgraph Storage [Storage Layer]
-        Firestore[(Cloud Firestore\nMetadata & Chat History)]
-        S3[(AWS S3\nSource PDFs)]
-        Pinecone[(Pinecone\nVector Store)]
-    end
+    %% File Upload Pipeline
+    Upload --> S3[(S3)]
+    Upload --> Firestore[(FireStore)]
+    S3 --> Chunking[PDF Ingestion, Chunking]
+    Chunking --> VectorStore[(Vector Store)]
 
-    API -->|Upload| Storing
-    Storing -->|Raw PDF| S3
-    Storing -->|Vectors| Pinecone
-    Storing -->|Metadata| Firestore
+    %% Chat & RAG Pipeline
+    Chat --> GuardRails[GuardRails]
+    Chat --> Firestore
+    GuardRails --> VectorStore
+    VectorStore --> ReRank[Re-Rank]
+    ReRank --> LLM((Brain / LLM))
+    LLM --> Chat
 
-    API -->|Query| Chatting
-    Chatting -->|Search| Pinecone
-    Chatting <-->|Messages| Firestore
-    Chatting -.->|Tracing| LangSmith[LangSmith]
-
-    API -->|3. Response| App
+    %% Analytics & Observability
+    LLM --> LangSmith[LangSmith]
+    ReRank --> Ragas[Ragas]
+    Ragas --> LangSmith
+    Analytics <--> LangSmith
 ```
 
-- **1. Client (`Flutter App`):** User interface for document management and conversational Q&A.
-- **2. Auth Layer (`Firebase Auth`):** Authenticates users first and attaches verified ID tokens to all requests.
-- **3. Backend API (`FastAPI`):** Validates the Firebase token, enforces user/folder isolation, and orchestrates pipelines.
-- **4. Storing Flow (Ingestion):** Saves original PDF to **AWS S3**, chunks content with **PyMuPDF**, indexes vectors in **Pinecone**, and records document metadata in **Cloud Firestore**.
-- **5. Chatting Flow (RAG):** Retrieves top chunks from **Pinecone**, reranks with **FlashRank**, generates answers with LLM, and persists conversation messages in **Cloud Firestore**.
-- **Storage Layer:**
-  - **Cloud Firestore:** Document metadata, folder hierarchy, and chat history.
-  - **AWS S3:** Raw PDF files and visual assets.
-  - **Pinecone:** Isolated vector embeddings (`user_{id}_folder_{id}`).
+- **Authentication & Workspace Entry:** The **Flutter App** authenticates through **Firebase Auth**, loads the **Interface UI**, and selects or creates a **Folder / Workspace**.
+- **File Upload Flow:** Source PDFs stream into **AWS S3** and are chunked & embedded into the **Vector Store** (Pinecone), while document metadata is stored in **Cloud Firestore**.
+- **Chat & RAG Pipeline:** Queries pass through **GuardRails** to retrieve candidate chunks from the **Vector Store**, rerank via **Re-Rank** (FlashRank), and synthesize grounded answers through the **Brain (LLM)** back to **Chat**. Conversation history is persisted in **Cloud Firestore**.
+- **Analytics & Observability:** The LLM streams execution traces to **LangSmith**, and **Ragas** logs evaluation scores. The **Analytics** dashboard queries **LangSmith** directly for token and latency metrics.
 
 
 ---

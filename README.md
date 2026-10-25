@@ -18,7 +18,7 @@ Standard vector search frequently retrieves text passages that share keywords wi
 - **Two-Stage Re-ranking**: Retrieves top candidates from Pinecone and re-scores them locally with FlashRank to guarantee top-ranked relevance.
 - **Citation-Backed Generation**: Every claim cites its exact source document and page number.
 - **Multimodal Inline Figures**: Displays referenced diagrams, charts, and tables alongside conversational responses.
-- **Multi-Tenant Isolation**: Enforces per-user and per-folder namespace partitioning in Pinecone with Firebase authentication.
+- **Multi-Tenant Isolation**: Enforces per-user and per-folder namespace partitioning in Pinecone and hierarchical data isolation in Cloud Firestore with Firebase Authentication.
 - **Automated Observability & Evaluation**: Telemetry, latency, token consumption, and Ragas quality metrics tracked via LangSmith.
 
 ---
@@ -61,22 +61,86 @@ Evaluated on **7 benchmark question-answer pairs** built from **A Country Doctor
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Flutter App] --> B[FastAPI]
-    B --> C[Firebase Auth]
-    B --> D[(S3: PDFs)]
-    D --> E[Parse & Multimodal Chunking]
-    E --> F[(Pinecone: per-user, per-folder namespaces)]
-    B --> G[Dense Retrieval: Top 15]
-    G --> F
-    G --> H[FlashRank Cross-Encoder Rerank: Top 8]
-    H --> I[Grounded LLM Answer with Citations]
-    I --> A
-    I -.-> J[LangSmith Telemetry & Tracing]
+flowchart TD
+    subgraph Client ["Client Layer"]
+        Flutter["Flutter Application\n(Mobile & Desktop UI)"]
+    end
+
+    subgraph AuthLayer ["Authentication Layer"]
+        FirebaseAuth["Firebase Authentication\n(User Sign-In & Bearer ID Tokens)"]
+    end
+
+    subgraph Gateway ["Backend API Gateway (FastAPI)"]
+        FastAPI["FastAPI Backend"]
+        VerifyAuth["Firebase Admin SDK\n(Token Verification & Multi-Tenant Context)"]
+        FastAPI --- VerifyAuth
+    end
+
+    subgraph StorageLayer ["Data & Storage Layer"]
+        Firestore[("Cloud Firestore\n• User Profiles & Folder Hierarchy\n• PDF Document Metadata\n• Chat History & Messages")]
+        S3[("AWS S3\n• Raw Source PDFs\n• Extracted Figure Assets")]
+        Pinecone[("Pinecone Vector DB\n• Isolated Namespaces\n  (user_{uid}_folder_{id})")]
+    end
+
+    subgraph StoringPipeline ["Storing Flow (Document Ingestion)"]
+        UploadRoute["/upload-pdf Route"]
+        Parser["PyMuPDF Parser\n(Text, Tables & Visual Figures)"]
+        Chunker["Multimodal Chunker &\nEmbedding Generation"]
+    end
+
+    subgraph ChattingPipeline ["Chatting Flow (Conversational RAG)"]
+        ChatRoute["/agent Chat Route"]
+        DenseRetriever["Dense Vector Retrieval\n(Top 15 Candidates)"]
+        FlashRank["FlashRank Cross-Encoder\n(Local Neural Reranking: Top 8)"]
+        LLM["Grounded LLM Generator\n(LangChain + OpenAI)"]
+    end
+
+    subgraph Observability ["Observability & Evaluation"]
+        LangSmith["LangSmith Tracing\n(Latency, Token Usage & Run Trees)"]
+    end
+
+    %% Authentication Flow
+    Flutter <-->|"1. Authenticate & Obtain ID Token"| FirebaseAuth
+    Flutter -->|"2. Authenticated API Requests (Bearer Token)"| FastAPI
+
+    %% Storing Flow
+    FastAPI -->|"PDF Upload"| UploadRoute
+    UploadRoute -->|"1. Store Raw PDF"| S3
+    UploadRoute -->|"2. Extract Content"| Parser
+    Parser --> Chunker
+    Chunker -->|"3. Index Vector Embeddings"| Pinecone
+    UploadRoute -->|"4. Persist Document Metadata"| Firestore
+
+    %% Chatting Flow
+    FastAPI -->|"User Query"| ChatRoute
+    ChatRoute -->|"1. Read / Write Message History"| Firestore
+    ChatRoute -->|"2. Retrieve Candidates"| DenseRetriever
+    DenseRetriever -->|"Query Namespace"| Pinecone
+    DenseRetriever -->|"Top 15 Chunks"| FlashRank
+    FlashRank -->|"Top 8 Reranked Chunks"| LLM
+    LLM -->|"3. Grounded Answer with Citations & Figures"| ChatRoute
+    ChatRoute -->|"4. Response to Client"| Flutter
+    LLM -.->|"Tracing & Telemetry"| LangSmith
 ```
 
-- **Ingestion:** Source PDF uploaded to AWS S3 → PyMuPDF extracts text streams, tables, and visual figures → Token-aware chunker preserves page indices and bounding boxes → Chunks indexed with metadata into isolated Pinecone namespaces.
-- **Query:** Incoming question authenticated via Firebase → Dense vector search retrieves top 15 candidate passages → FlashRank neural cross-encoder rescores and trims to top 8 passages → LangChain orchestrates citation-grounded response with figure attachments.
+- **Authentication Layer:** Users authenticate through **Firebase Authentication** on the client. Every API request to FastAPI includes a Bearer ID token verified on the server via the Firebase Admin SDK (`get_current_user_id`), enforcing hard multi-tenant isolation.
+- **Storing Flow (Document Ingestion):**
+  1. Source PDF is streamed and stored in **AWS S3** (`pdfs/{user_id}/{pdf_id}.pdf`).
+  2. **PyMuPDF** extracts text streams, tables, and visual figures directly from the document.
+  3. Token-aware chunker preserves page indices and coordinates, generating vector embeddings.
+  4. Chunks are indexed into **Pinecone** under dedicated per-user/per-folder namespaces (`user_{uid}_folder_{folder_id}`).
+  5. Document metadata (S3 key, chunk counts, page counts, upload timestamp) is persisted in **Cloud Firestore** under `users/{uid}/folders/{folder_id}/pdfs/{pdf_id}`.
+- **Chatting Flow (Conversational RAG):**
+  1. Incoming questions are authenticated, and chat session/messages are persisted in **Cloud Firestore** (`users/{uid}/folders/{folder_id}/chats/main_chat/messages`).
+  2. Dense vector search queries the user/folder namespace in **Pinecone** to retrieve top 15 candidate passages.
+  3. **FlashRank** local neural cross-encoder reranks the candidates to the top 8 most relevant passages.
+  4. **LangChain** and **OpenAI** synthesize a citation-grounded response with page references and inline figures.
+  5. The response is returned to the Flutter client, with execution traces logged to **LangSmith**.
+- **Data & Storage Layer Separation:**
+  - **Cloud Firestore:** Application database for user profiles, folder hierarchy, PDF document metadata, and chat history.
+  - **AWS S3:** Scalable object store for source PDF files and extracted figure assets.
+  - **Pinecone:** Vector database for semantic chunk retrieval partitioned by multi-tenant namespaces.
+
 
 ---
 
@@ -122,7 +186,7 @@ flowchart LR
 
 ## Tech stack
 
-FastAPI · LangChain · Pinecone · FlashRank · PyMuPDF · AWS S3 · Firebase · Ragas · LangSmith · Flutter
+FastAPI · LangChain · Pinecone · FlashRank · PyMuPDF · AWS S3 · Firebase (Auth & Firestore) · Ragas · LangSmith · Flutter
 
 ---
 
@@ -132,7 +196,7 @@ The client is a responsive, cross-platform **Flutter** application (mobile and d
 - Folder-based PDF library management with instant search.
 - Interactive conversational chat window supporting inline markdown rendering and page-level citation chips.
 - Integrated figure viewer that renders extracted diagrams, charts, and tables directly alongside generated answers.
-- Real-time synchronization with Firebase authentication and user-specific document workspaces.
+- Real-time synchronization with Firebase Authentication, Cloud Firestore document/chat state, and user-specific document workspaces.
 
 ---
 

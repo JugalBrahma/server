@@ -76,3 +76,8 @@ Thumbs.db
 .bm25_cache/
 bm25_cache/
 *.log
+
+# Markdown files (keep only README)
+*.md
+!README.md
+!**/README.md

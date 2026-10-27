@@ -10,7 +10,6 @@ langchain
 langchain-text-splitters
 langchain_community
 langchain-google-vertexai
-langchain-groq
 langchain-openai
 langchain-openrouter
 openai

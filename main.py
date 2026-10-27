@@ -36,7 +36,8 @@ app.include_router(delete_pdf_router)
 # Keep the /agent path because existing clients use it.
 app.include_router(chat_router)
 app.include_router(analytics_router, prefix="/api")
-app.include_router(debug_pdf_router, prefix="/debug")
+if os.getenv("ENABLE_DEBUG_ROUTES", "false").lower() == "true":
+    app.include_router(debug_pdf_router, prefix="/debug")
 
 
 @app.on_event("startup")

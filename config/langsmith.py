@@ -38,9 +38,9 @@ def init_langsmith():
 
     if tracing_enabled:
         if api_key_present:
-            logger.info("🔍 LangSmith Tracing ENABLED for project: '%s'", project)
+            logger.info("LangSmith Tracing ENABLED for project: '%s'", project)
         else:
-            logger.warning("⚠️ LangSmith Tracing is enabled for project '%s', but LANGSMITH_API_KEY is not set in .env.", project)
+            logger.warning("LangSmith Tracing is enabled for project '%s', but LANGSMITH_API_KEY is not set in .env.", project)
     else:
         logger.info("LangSmith Tracing is disabled.")
 

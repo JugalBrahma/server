@@ -1,48 +1,25 @@
+"""Run the RAG evaluation experiment. Run from the server root: python -m evaluate.datasets_evaluate"""
 import argparse
 import logging
 import os
-import re
-import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
+from langsmith import Client, evaluate
 
-SERVER_ROOT = Path(__file__).resolve().parent.parent
-script_dir = str(Path(__file__).resolve().parent)
-sys.path = [p for p in sys.path if p != script_dir]
-if str(SERVER_ROOT) not in sys.path:
-    sys.path.insert(0, str(SERVER_ROOT))
-load_dotenv(SERVER_ROOT / ".env")
-
-from langsmith import Client, evaluate  # noqa: E402
+load_dotenv()
 
 from agent.agent import RAGAgent  # noqa: E402
 from evaluate.datasets_data import examples  # noqa: E402
-from evaluate.metrics import EVALUATORS
+from evaluate.metrics import EVALUATORS  # noqa: E402
+from evaluate.ragas import clean_llm_response  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 DATASET_NAME = os.getenv("DATASET_NAME", "datasets_data")
 DATASET_DESCRIPTION = "QA Dataset for A Country Doctor"
 EXPERIMENT_PREFIX = "country-doctor-eval"
-DEFAULT_NAMESPACE = os.getenv(
-    "EVAL_NAMESPACE",
-    "user_gpYcXNxxJ7hzdctAvJm5eAaafKl2_folder_AWMbOvw6jBs2N11YirBJ",
-)
+DEFAULT_NAMESPACE = os.getenv("EVAL_NAMESPACE")
 TOP_K = 8
-
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
-_DOC_TAGS = re.compile(r"</?doc>")
-
-
-def clean_answer(raw: str) -> str:
-    """Drop reasoning blocks and <doc> markers, keeping only the final answer."""
-    if "</think>" in raw:
-        raw = raw.split("</think>")[-1]
-    else:
-        raw = _THINK_BLOCK.sub("", raw)
-        raw = raw.split("<think>")[0]  # unclosed think block
-    return _DOC_TAGS.sub("", raw).strip()
 
 
 def ensure_dataset(client: Client) -> None:
@@ -86,12 +63,12 @@ def build_predict(rag_agent: RAGAgent, enable_reranker: bool = True):
         # Use the actual reranked contexts the agent retrieved
         contexts = result.get("contexts")
         if not contexts:
-            top_k = rag_agent.config.rerank_top_k if not enable_reranker else TOP_K
-            docs = rag_agent.config.vector_manager.search(query=question, k=top_k)
+            top_k = rag_agent.deps.rerank_top_k if not enable_reranker else TOP_K
+            docs = rag_agent.deps.vector_manager.search(query=question, k=top_k)
             contexts = [d.page_content for d in docs if getattr(d, "page_content", None)]
 
         return {
-            "output": clean_answer(result.get("answer", "")),
+            "output": clean_llm_response(result.get("answer", "")),
             "retrieved_contexts": contexts,
         }
 
@@ -99,7 +76,7 @@ def build_predict(rag_agent: RAGAgent, enable_reranker: bool = True):
 
 
 def run_experiment(
-    namespace: str = DEFAULT_NAMESPACE,
+    namespace: str | None = DEFAULT_NAMESPACE,
     dataset_name: str = DATASET_NAME,
     enable_reranker: bool = True,
 ):

@@ -10,16 +10,18 @@ from langsmith.run_helpers import get_current_run_tree
 from .guardrail import check_greeting_guardrail
 from .llm_manager import LLMManager
 from .reranker import DocumentReranker, RerankResult
-from .vector_manager import VectorSearchManager
+from .vector_manager import DEFAULT_NAMESPACE, VectorSearchManager
 
 logger = logging.getLogger(__name__)
 
 
-class AgentConfig:
+class AgentDependencies:
+    """The LLM, vector store and reranker an agent works with."""
+
     def __init__(
         self,
         index_name: Optional[str] = None,
-        namespace: str = "test-2",
+        namespace: str = DEFAULT_NAMESPACE,
         model_name: Optional[str] = None,
         enable_reranker: Optional[bool] = None,
     ):
@@ -42,17 +44,23 @@ class RAGAgent:
     def __init__(
         self,
         index_name: Optional[str] = None,
-        namespace: str = "test-2",
+        namespace: str = DEFAULT_NAMESPACE,
         model_name: Optional[str] = None,
         enable_reranker: Optional[bool] = None,
     ):
-        self.config = AgentConfig(
+        self.deps = AgentDependencies(
             index_name=index_name,
             namespace=namespace,
             model_name=model_name,
             enable_reranker=enable_reranker,
         )
         self.namespace = namespace
+
+    def _active_reranker(self, enable_reranker: Optional[bool]) -> Optional[DocumentReranker]:
+        """The reranker to use for one call: a per-call override wins over the configured default."""
+        if enable_reranker is False:
+            return None
+        return self.deps.reranker
 
     @traceable(run_type="retriever", name="Document Retrieval & Reranking")
     def retrieve_documents(
@@ -67,15 +75,11 @@ class RAGAgent:
         """
         try:
             logger.info("Retrieving chunks for query '%s' in namespace '%s'", query, self.namespace)
-            reranker = (
-                self.config.reranker
-                if enable_reranker is None
-                else (self.config.reranker if enable_reranker else None)
-            )
+            reranker = self._active_reranker(enable_reranker)
 
             # Step 1: Query vector database for top matching candidate chunks
-            fetch_k = self.config.fetch_k if reranker else self.config.rerank_top_k
-            results = self.config.vector_manager.search(query=query, k=fetch_k)
+            fetch_k = self.deps.fetch_k if reranker else self.deps.rerank_top_k
+            results = self.deps.vector_manager.search(query=query, k=fetch_k)
             if not results:
                 return "", [], RerankResult([], applied=False, fallback_used=False)
 
@@ -84,11 +88,11 @@ class RAGAgent:
                 rerank_result = reranker.rerank_with_status(
                     query=query,
                     documents=results,
-                    top_k=self.config.rerank_top_k,
+                    top_k=self.deps.rerank_top_k,
                 )
                 results = rerank_result.documents
             else:
-                results = results[:self.config.rerank_top_k]
+                results = results[:self.deps.rerank_top_k]
                 rerank_result = RerankResult(results, applied=False, fallback_used=False)
 
             # Step 3: Group chunks by document identity (doc_id, s3_key, namespace)
@@ -134,6 +138,43 @@ class RAGAgent:
             logger.exception("Retrieval error for namespace '%s'", self.namespace)
             return "", [], RerankResult([], applied=False, fallback_used=False)
 
+    @staticmethod
+    def _attach_trace_metadata(folder_id: Optional[str], user_id: Optional[str]) -> None:
+        """Tag the current LangSmith run with the folder and user, if tracing is active."""
+        try:
+            run_tree = get_current_run_tree()
+            if not run_tree:
+                return
+            for key, value in (("folder_id", folder_id), ("user_id", user_id)):
+                if not value:
+                    continue
+                run_tree.extra.setdefault("metadata", {})[key] = value
+                tag = f"{key.removesuffix('_id')}_{value}"
+                if tag not in run_tree.tags:
+                    run_tree.tags.append(tag)
+        except Exception as exc:
+            logger.warning("Failed to attach trace metadata: %s", exc)
+
+    @staticmethod
+    def _build_prompts(user_input: str, retrieved_docs: str) -> Tuple[str, str]:
+        """Grounded QA prompts if documents were found, a fallback prompt if not."""
+        if not retrieved_docs:
+            system_prompt = (
+                "You are a helpful assistant. If the user greets you, reply politely. "
+                "If they ask a question about specific documents, inform them that no matching documents were found in this folder."
+            )
+            return system_prompt, user_input
+
+        system_prompt = (
+            "You are an intelligent document assistant. "
+            "Answer the question based strictly on the retrieved document context below. "
+            "Pay close attention to chronological and temporal qualifiers in questions (such as 'initially', 'first', 'before', 'later'). "
+            "Wrap only the exact facts, quotes, figures, and direct information from the documents in <doc> and </doc> tags. Use normal plain text for your own connecting words, and do not wrap entire sentences in <doc> tags. "
+            "If the context does not contain the answer, politely state that the information was not found in the documents."
+        )
+        user_prompt = f'User Question: "{user_input}"\n\nRetrieved Documents:\n{retrieved_docs}\n\nAnswer:'
+        return system_prompt, user_prompt
+
     @traceable(run_type="chain", name="RAG Agent Query")
     def query(
         self,
@@ -152,30 +193,11 @@ class RAGAgent:
         4. Construct system & human prompts (grounded QA if docs exist, fallback if not).
         5. Invoke the LLM and return the generated answer along with retrieved contexts.
         """
-        # Step 1: Attach LangSmith tracing metadata and tags
-        try:
-            run_tree = get_current_run_tree()
-            if run_tree:
-                if folder_id:
-                    run_tree.extra.setdefault("metadata", {})["folder_id"] = folder_id
-                    tag = f"folder_{folder_id}"
-                    if tag not in run_tree.tags:
-                        run_tree.tags.append(tag)
-                if user_id:
-                    run_tree.extra.setdefault("metadata", {})["user_id"] = user_id
-                    tag = f"user_{user_id}"
-                    if tag not in run_tree.tags:
-                        run_tree.tags.append(tag)
-        except Exception as exc:
-            logger.warning("Failed to attach trace metadata: %s", exc)
+        self._attach_trace_metadata(folder_id, user_id)
 
         # Step 2: Check greeting guardrail (fast-path for greetings)
         is_greeting, greeting_reply = check_greeting_guardrail(user_input)
-        reranker_is_active = (
-            self.config.reranker is not None
-            if enable_reranker is None
-            else (self.config.reranker is not None and enable_reranker)
-        )
+        reranker_is_active = self._active_reranker(enable_reranker) is not None
 
         if is_greeting and greeting_reply:
             logger.info("Greeting intercepted for query: '%s'", user_input)
@@ -195,26 +217,10 @@ class RAGAgent:
             enable_reranker=enable_reranker,
         )
 
-        # Step 4: Build prompts (grounded QA if documents found, fallback if not)
-        if retrieved_docs:
-            system_prompt = (
-                "You are an intelligent document assistant. "
-                "Answer the question based strictly on the retrieved document context below. "
-                "Pay close attention to chronological and temporal qualifiers in questions (such as 'initially', 'first examination', 'before', 'later'). "
-                "Note that an initial assessment or finding that a patient is healthy or has sluggish circulation counts as the initial diagnosis—do not confuse an initial assessment with any later re-examination or subsequent discovery of wounds/illness. "
-                "Wrap only the exact facts, quotes, figures, and direct information from the documents in <doc> and </doc> tags. Use normal plain text for your own connecting words, and do not wrap entire sentences in <doc> tags. "
-                "If the context does not contain the answer, politely state that the information was not found in the documents."
-            )
-            user_prompt = f'User Question: "{user_input}"\n\nRetrieved Documents:\n{retrieved_docs}\n\nAnswer:'
-        else:
-            system_prompt = (
-                "You are a helpful assistant. If the user greets you, reply politely. "
-                "If they ask a question about specific documents, inform them that no matching documents were found in this folder."
-            )
-            user_prompt = user_input
+        system_prompt, user_prompt = self._build_prompts(user_input, retrieved_docs)
 
         # Step 5: Invoke the LLM and extract the response
-        response = self.config.llm.invoke([
+        response = self.deps.llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ])
@@ -232,7 +238,7 @@ class RAGAgent:
         }
 
     def add_documents(self, documents, metadatas=None, s3_key=None):
-        return self.config.vector_manager.add_documents(documents, metadatas, s3_key)
+        return self.deps.vector_manager.add_documents(documents, metadatas, s3_key)
 
     def delete_documents(self, doc_ids: List[str]) -> bool:
-        return self.config.vector_manager.delete_documents(doc_ids)
+        return self.deps.vector_manager.delete_documents(doc_ids)

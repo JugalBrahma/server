@@ -14,6 +14,7 @@ from pinecone_text.sparse import BM25Encoder
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_NAMESPACE = "test-2"
 DENSE_DEFAULT_K = 2
 MIN_CHUNK_CHARS = 10
 MAX_METADATA_BYTES = 35_000  # Pinecone limit is 40KB
@@ -181,7 +182,7 @@ def _build_metadata(i: int, s3_key: Optional[str], fields: Dict, raw: Dict) -> D
     return metadata
 
 
-def prepare_chunks(
+def normalize_for_index(
     documents: List[Any],
     metadatas: Optional[List[Dict]] = None,
     s3_key: Optional[str] = None,
@@ -203,7 +204,7 @@ def prepare_chunks(
 class VectorSearchManager:
     """Vector search over Pinecone, with optional BM25 hybrid retrieval."""
 
-    def __init__(self, index_name: Optional[str] = None, namespace: str = "test-2"):
+    def __init__(self, index_name: Optional[str] = None, namespace: str = DEFAULT_NAMESPACE):
         self.config = VectorConfig.from_env(index_name)
         self.index_name = self.config.index_name
         self.namespace = namespace
@@ -296,7 +297,7 @@ class VectorSearchManager:
         s3_key: Optional[str] = None,
     ) -> bool:
         try:
-            texts, cleaned = prepare_chunks(documents, metadatas, s3_key)
+            texts, cleaned = normalize_for_index(documents, metadatas, s3_key)
             if not texts:
                 logger.warning("No valid text chunks to index.")
                 return False
@@ -363,8 +364,3 @@ class VectorSearchManager:
             }
         except Exception as e:
             return {"error": str(e)}
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    print("Stats:", VectorSearchManager().get_stats())

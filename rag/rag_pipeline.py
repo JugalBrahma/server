@@ -9,21 +9,18 @@ from typing import Dict, List, Tuple
 
 from openai import OpenAI
 
-from agent.vector_manager import VectorSearchManager
+from agent.vector_manager import DEFAULT_NAMESPACE, VectorSearchManager
 from .ingestion import prepare_chunks
 from .text_processing import extract_pdf_elements
 
 logger = logging.getLogger(__name__)
-
-# Backwards compatibility alias
-VectorStoreManager = VectorSearchManager
 
 
 def run_optimized_pipeline(
     pdf_path: str,
     use_cache: bool = True,
     index_name: str = "askadocument",
-    namespace: str = "test-2",
+    namespace: str = DEFAULT_NAMESPACE,
 ) -> Tuple[VectorSearchManager, List[Dict]]:
     """Run the complete RAG ingestion pipeline for a PDF document."""
     logger.info("Starting RAG ingestion pipeline for: %s", pdf_path)

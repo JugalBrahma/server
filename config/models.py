@@ -1,47 +1,17 @@
 import os
 from dotenv import load_dotenv
 from langchain_core.language_models.chat_models import BaseChatModel
-# from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_openrouter import ChatOpenRouter
 
 load_dotenv()
 
-# DEFAULT_OPENAI_MODEL = os.getenv("AGENT_MODEL")
 DEFAULT_OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL")
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
 DEFAULT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.7"))
 DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").lower()
 DEFAULT_RAGAS_EVAL_MODEL = os.getenv("RAGAS_EVAL_MODEL", "deepseek/deepseek-chat")
-
-
-# def get_groq_llm(
-#     model: str = DEFAULT_GROQ_MODEL,
-#     temperature: float = DEFAULT_TEMPERATURE,
-#     **kwargs,
-# ) -> BaseChatModel:
-#     return ChatGroq(model=model, temperature=temperature, **kwargs)
-
-
-# def get_openai_llm(
-#     model: str = DEFAULT_OPENAI_MODEL,
-#     temperature: float = DEFAULT_TEMPERATURE,
-#     **kwargs,
-# ) -> BaseChatModel:
-#     return ChatOpenAI(model=model, temperature=temperature, **kwargs)
-# def get_openai_embeddings(
-#     model: str | None = None,
-#     dimensions: int | None = None,
-#     **kwargs,
-# ) -> OpenAIEmbeddings:
-#     selected_model = model or DEFAULT_EMBEDDING_MODEL
-#     selected_dim = dimensions or DEFAULT_EMBEDDING_DIM
-#     return OpenAIEmbeddings(
-#         model=selected_model,
-#         dimensions=selected_dim,
-#         **kwargs,
-#     )
 
 
 def get_openrouter_llm(
@@ -68,9 +38,6 @@ def get_rag_llm(
     provider: str | None = None,
     **kwargs,
 ) -> BaseChatModel:
-    # selected_provider = (provider or DEFAULT_PROVIDER).lower()
-    # if selected_provider == "openai":
-    #     return get_openai_llm(model=model or DEFAULT_OPENAI_MODEL, temperature=temperature, **kwargs)
     return get_openrouter_llm(
         model=model or DEFAULT_OPENROUTER_MODEL,
         temperature=temperature,
@@ -79,7 +46,6 @@ def get_rag_llm(
 
 
 # ---------------------------------------------------------------- embeddings
-
 
 
 def get_openrouter_embeddings(
@@ -110,9 +76,6 @@ def get_embeddings(
     **kwargs,
 ) -> OpenAIEmbeddings:
     """Returns the configured embeddings instance (default: OpenRouter)."""
-    # selected_provider = (provider or DEFAULT_PROVIDER).lower()
-    # if selected_provider == "openai":
-    #     return get_openai_embeddings(model=model, dimensions=dimensions, **kwargs)
     return get_openrouter_embeddings(model=model, dimensions=dimensions, **kwargs)
 
 

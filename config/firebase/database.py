@@ -5,7 +5,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 # -------------------------------
-# 🔐 Firebase Initialization (ONCE)
+# Firebase Initialization (ONCE)
 # -------------------------------
 if not firebase_admin._apps:
     # For Railway deployment or local dev, resolve relative to server root

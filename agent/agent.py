@@ -1,12 +1,13 @@
 import os
 import logging
 from collections import defaultdict
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 
+from .citations import resolve_citations
 from .guardrail import check_greeting_guardrail
 from .llm_manager import LLMManager
 from .reranker import DocumentReranker, RerankResult
@@ -67,11 +68,14 @@ class RAGAgent:
         self,
         query: str,
         enable_reranker: Optional[bool] = None,
-    ) -> Tuple[str, List[Any], RerankResult]:
+    ) -> Tuple[str, List[Any], RerankResult, Dict[int, Dict[str, Any]]]:
         """
         Retrieves matching document chunks from Pinecone vector store,
         optionally reranks them using neural cross-attention (FlashRank),
-        and formats them for the LLM.
+        and formats them for the LLM with a numbered ID per chunk.
+
+        Also returns the metadata of each chunk keyed by its ID, so citations
+        the LLM makes can be resolved to files and pages.
         """
         try:
             logger.info("Retrieving chunks for query '%s' in namespace '%s'", query, self.namespace)
@@ -81,7 +85,7 @@ class RAGAgent:
             fetch_k = self.deps.fetch_k if reranker else self.deps.rerank_top_k
             results = self.deps.vector_manager.search(query=query, k=fetch_k)
             if not results:
-                return "", [], RerankResult([], applied=False, fallback_used=False)
+                return "", [], RerankResult([], applied=False, fallback_used=False), {}
 
             # Step 2: Neural cross-encoder reranking
             if reranker:
@@ -95,48 +99,39 @@ class RAGAgent:
                 results = results[:self.deps.rerank_top_k]
                 rerank_result = RerankResult(results, applied=False, fallback_used=False)
 
-            # Step 3: Group chunks by document identity (doc_id, s3_key, namespace)
+            # Step 3: Group chunks by source file
             results_by_doc = defaultdict(list)
             for doc in results:
                 metadata = getattr(doc, "metadata", {}) or {}
-                doc_id = metadata.get("doc_id") or metadata.get("s3_key", "unknown_doc")
                 s3_key = metadata.get("s3_key", "unknown_source")
-                namespace_hint = metadata.get("namespace", self.namespace)
-                results_by_doc[(doc_id, s3_key, namespace_hint)].append({
+                results_by_doc[s3_key].append({
                     "content": doc.page_content,
                     "metadata": metadata,
                     "content_type": metadata.get("content_type", "unknown"),
                 })
 
-            # Step 4: Sort chunks by page number and format each document into a labeled text block
+            # Step 4: Sort chunks by page number and label each chunk with a numbered ID.
+            # Page numbers stay out of the prompt: they are added from metadata via the cited IDs.
             formatted = []
-            for i, ((doc_id, s3_key, _), chunks) in enumerate(results_by_doc.items(), 1):
-                # Order chunks by page number
+            chunk_refs: Dict[int, Dict[str, Any]] = {}
+            for i, (s3_key, chunks) in enumerate(results_by_doc.items(), 1):
                 chunks.sort(key=lambda c: c["metadata"].get("page_number", 0))
-                combined_text = "\n\n".join(c["content"] for c in chunks)
+                passages = []
+                for chunk in chunks:
+                    chunk_id = len(chunk_refs) + 1
+                    chunk_refs[chunk_id] = chunk["metadata"]
+                    content_type = chunk["content_type"]
+                    label = f"[{chunk_id}]" if content_type in ("text", "unknown") else f"[{chunk_id}] ({content_type})"
+                    passages.append(f"{label}\n{chunk['content']}")
 
-                # Determine the page range (e.g., 'pages 2–4' or 'page 2')
-                pages = [c["metadata"].get("page_number") for c in chunks if c["metadata"].get("page_number") is not None]
-                if pages:
-                    first_page, last_page = pages[0], pages[-1]
-                    page_span = f"pages {first_page}–{last_page}" if first_page != last_page else f"page {first_page}"
-                else:
-                    page_span = "unknown pages"
+                file_name = chunks[0]["metadata"].get("file_name") or s3_key
+                header = f"[Document {i}]\nSource: {file_name}\n"
+                formatted.append(f"{header}Passages:\n" + "\n\n".join(passages) + "\n" + "=" * 50 + "\n")
 
-                content_type = chunks[0]["content_type"]
-                header = (
-                    f"[Document {i}]\n"
-                    f"ID: {doc_id}\n"
-                    f"Source: {s3_key}\n"
-                    f"Type: {content_type}\n"
-                    f"Pages: {page_span}\n"
-                )
-                formatted.append(f"{header}Content:\n{combined_text}\n" + "=" * 50 + "\n")
-
-            return "\n".join(formatted), results, rerank_result
+            return "\n".join(formatted), results, rerank_result, chunk_refs
         except Exception:
             logger.exception("Retrieval error for namespace '%s'", self.namespace)
-            return "", [], RerankResult([], applied=False, fallback_used=False)
+            return "", [], RerankResult([], applied=False, fallback_used=False), {}
 
     @staticmethod
     def _attach_trace_metadata(folder_id: Optional[str], user_id: Optional[str]) -> None:
@@ -170,7 +165,10 @@ class RAGAgent:
             "Answer the question based strictly on the retrieved document context below. "
             "Pay close attention to chronological and temporal qualifiers in questions (such as 'initially', 'first', 'before', 'later'). "
             "Wrap only the exact facts, quotes, figures, and direct information from the documents in <doc> and </doc> tags. Use normal plain text for your own connecting words, and do not wrap entire sentences in <doc> tags. "
-            "If the context does not contain the answer, politely state that the information was not found in the documents."
+            "Each passage is labeled with a numbered ID such as [1]. After each statement that uses a passage, cite its ID in square brackets, "
+            "for example: 'He planted roses <doc>in his yard</doc> [2].' Cite several IDs as [1, 3]. Only cite IDs that appear in the context. "
+            "Do not mention page numbers or file names yourself; sources are added to your answer automatically. "
+            "If the context does not contain the answer, politely state that the information was not found in the documents, without citing anything."
         )
         user_prompt = f'User Question: "{user_input}"\n\nRetrieved Documents:\n{retrieved_docs}\n\nAnswer:'
         return system_prompt, user_prompt
@@ -192,6 +190,7 @@ class RAGAgent:
         3. Retrieve and neural-rerank relevant document context via retrieve_documents().
         4. Construct system & human prompts (grounded QA if docs exist, fallback if not).
         5. Invoke the LLM and return the generated answer along with retrieved contexts.
+        6. Resolve the chunk IDs the LLM cited into sources (file and pages) from chunk metadata.
         """
         self._attach_trace_metadata(folder_id, user_id)
 
@@ -204,6 +203,7 @@ class RAGAgent:
             return {
                 "answer": greeting_reply,
                 "contexts": [],
+                "sources": [],
                 "retrieval": {
                     "reranker_enabled": reranker_is_active,
                     "reranker_applied": False,
@@ -212,7 +212,7 @@ class RAGAgent:
             }
 
         # Step 3: Retrieve and rerank relevant document chunks from Pinecone
-        retrieved_docs, raw_chunks, rerank_result = self.retrieve_documents(
+        retrieved_docs, raw_chunks, rerank_result, chunk_refs = self.retrieve_documents(
             user_input,
             enable_reranker=enable_reranker,
         )
@@ -227,9 +227,13 @@ class RAGAgent:
 
         content = response.content if hasattr(response, "content") else str(response)
 
+        # Step 6: Map cited chunk IDs to files and pages; unknown IDs are dropped
+        answer, sources = resolve_citations(content, chunk_refs)
+
         return {
-            "answer": content,
+            "answer": answer,
             "contexts": [getattr(c, "page_content", str(c)) for c in raw_chunks],
+            "sources": sources,
             "retrieval": {
                 "reranker_enabled": reranker_is_active,
                 "reranker_applied": rerank_result.applied,
@@ -237,8 +241,8 @@ class RAGAgent:
             },
         }
 
-    def add_documents(self, documents, metadatas=None, s3_key=None):
-        return self.deps.vector_manager.add_documents(documents, metadatas, s3_key)
+    def add_documents(self, documents, metadatas=None, s3_key=None, file_name=None):
+        return self.deps.vector_manager.add_documents(documents, metadatas, s3_key, file_name)
 
     def delete_documents(self, doc_ids: List[str]) -> bool:
         return self.deps.vector_manager.delete_documents(doc_ids)

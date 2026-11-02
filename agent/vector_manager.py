@@ -169,8 +169,10 @@ def _safe_metadata(raw: Dict) -> Dict:
     return out
 
 
-def _build_metadata(i: int, s3_key: Optional[str], fields: Dict, raw: Dict) -> Dict:
+def _build_metadata(i: int, s3_key: Optional[str], fields: Dict, raw: Dict, file_name: Optional[str] = None) -> Dict:
     base = {"doc_id": f"doc_{i}", "s3_key": s3_key or "user_upload"}
+    if file_name:
+        base["file_name"] = file_name
     metadata = {
         **base,
         "content_type": fields.get("type", "text"),
@@ -186,6 +188,7 @@ def normalize_for_index(
     documents: List[Any],
     metadatas: Optional[List[Dict]] = None,
     s3_key: Optional[str] = None,
+    file_name: Optional[str] = None,
 ) -> Tuple[List[str], List[Dict]]:
     """Filter noise and build clean (texts, metadatas) ready for indexing."""
     texts, cleaned = [], []
@@ -195,7 +198,7 @@ def normalize_for_index(
         if not content or _is_noise(content):
             continue
         texts.append(content)
-        cleaned.append(_build_metadata(i, s3_key, fields, raw))
+        cleaned.append(_build_metadata(i, s3_key, fields, raw, file_name))
     return texts, cleaned
 
 
@@ -295,9 +298,10 @@ class VectorSearchManager:
         documents: List[Any],
         metadatas: Optional[List[Dict]] = None,
         s3_key: Optional[str] = None,
+        file_name: Optional[str] = None,
     ) -> bool:
         try:
-            texts, cleaned = normalize_for_index(documents, metadatas, s3_key)
+            texts, cleaned = normalize_for_index(documents, metadatas, s3_key, file_name)
             if not texts:
                 logger.warning("No valid text chunks to index.")
                 return False

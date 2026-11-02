@@ -1,11 +1,13 @@
 import logging
 import re
+from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from agent.agent import RAGAgent
 from config.firebase import get_current_user_id
+from routes.upload import get_owner_ref
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,23 @@ def get_agent_for_namespace(namespace: str) -> RAGAgent:
     return _agent_cache[namespace]
 
 
+def fill_source_file_names(sources: list[dict], user_id: str, folder_id: str | None) -> None:
+    """Look up the uploaded file name for sources whose chunks were indexed without one."""
+    for source in sources:
+        if source.get("file_name"):
+            continue
+        # s3_key is "pdfs/{user_id}/{pdf_id}.pdf" and pdf_id is the Firestore doc id
+        pdf_id = PurePosixPath(source.get("s3_key", "")).stem
+        file_name = None
+        try:
+            if pdf_id:
+                snapshot = get_owner_ref(user_id, folder_id).collection("pdfs").document(pdf_id).get()
+                file_name = (snapshot.to_dict() or {}).get("file_name") if snapshot.exists else None
+        except Exception as exc:
+            logger.warning("Failed to look up file name for %s: %s", source.get("s3_key"), exc)
+        source["file_name"] = file_name or "Unknown document"
+
+
 @router.post("/agent")
 async def chat_with_agent(
     chat_request: ChatRequest,
@@ -44,6 +63,8 @@ async def chat_with_agent(
             user_id=user_id,
             enable_reranker=chat_request.enable_reranker,
         )
+
+        fill_source_file_names(ai_response.get("sources", []), user_id, folder_id)
 
         answer = ai_response.get("answer", "")
         doc_refs = re.findall(r"<doc>.*?</doc>", answer)

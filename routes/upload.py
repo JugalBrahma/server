@@ -100,7 +100,7 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
         chunks = prepare_chunks(elements, client=openai_client)
         namespace = get_namespace(user_id, folder_id)
 
-        if not RAGAgent(namespace=namespace).add_documents(chunks, s3_key=s3_key):
+        if not RAGAgent(namespace=namespace).add_documents(chunks, s3_key=s3_key, file_name=file_name):
             raise HTTPException(502, "Vectorization failed")
 
         image_count = sum(1 for c in chunks if c.get("has_image"))

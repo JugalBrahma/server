@@ -15,13 +15,16 @@ def main() -> None:
         print("Set RETRIEVAL_NAMESPACE to the namespace you want to inspect.")
         return
 
+    # Unset means the root folder (PDFs uploaded outside any folder).
+    folder_id = os.getenv("RETRIEVAL_FOLDER_ID") or None
+
     vector_manager = VectorSearchManager(namespace=namespace)
     print(f"Vector store stats: {vector_manager.get_stats()}")
 
     queries = ["what is rag", "rag", "document content"]
     for query in queries:
         print(f"\nQuery: {query}")
-        results = vector_manager.search(query=query, k=5)
+        results = vector_manager.search(query=query, folder_id=folder_id, k=5)
 
         if not results:
             print("No results found.")

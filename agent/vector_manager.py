@@ -1,9 +1,7 @@
 import json
 import logging
 import os
-import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_community.retrievers import PineconeHybridSearchRetriever
@@ -11,6 +9,8 @@ from langchain_pinecone import PineconeVectorStore
 from config.models import DEFAULT_EMBEDDING_DIM, get_embeddings
 from pinecone import Pinecone, ServerlessSpec
 from pinecone_text.sparse import BM25Encoder
+
+from .bm25_store import Bm25Store
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,23 @@ MIN_CHUNK_CHARS = 10
 MAX_METADATA_BYTES = 35_000  # Pinecone limit is 40KB
 MAX_LIST_METADATA = 10
 KEPT_METADATA_KEYS = ("page_number", "page", "pages", "languages")
+
+# Each user has one namespace. Every vector stores the folder it belongs to, and
+# every search filters on it. PDFs uploaded outside any folder use ROOT_FOLDER,
+# because a Pinecone filter cannot match a missing field.
+ROOT_FOLDER = "root"
+
+
+def user_namespace(user_id: str) -> str:
+    return f"user_{user_id}"
+
+
+def folder_key(folder_id: Optional[str]) -> str:
+    return folder_id or ROOT_FOLDER
+
+
+def folder_filter(folder_id: Optional[str]) -> Dict[str, Any]:
+    return {"folder_id": {"$eq": folder_key(folder_id)}}
 
 
 # ---------------------------------------------------------------- config
@@ -31,7 +48,6 @@ class VectorConfig:
     region: str
     hybrid_alpha: float
     hybrid_requested: bool
-    bm25_dir: Path
 
     @classmethod
     def from_env(cls, index_name: Optional[str] = None) -> "VectorConfig":
@@ -45,98 +61,7 @@ class VectorConfig:
             region=os.getenv("PINECONE_REGION", "us-east-1"),
             hybrid_alpha=float(os.getenv("PINECONE_HYBRID_ALPHA", 0.5)),
             hybrid_requested=os.getenv("ENABLE_PINECONE_HYBRID", "true").lower() == "true",
-            bm25_dir=Path(os.getenv("BM25_STORAGE_DIR", "bm25_cache")),
         )
-
-
-# ---------------------------------------------------------- BM25 storage
-
-class Bm25Store:
-    """On-disk BM25 state for one namespace: corpus, source mapping, fitted encoder."""
-
-    def __init__(self, directory: Path, namespace: str):
-        directory.mkdir(parents=True, exist_ok=True)
-        stem = namespace.replace("/", "_")
-        self._state_path = directory / f"{stem}_bm25.json"
-        self._corpus_path = directory / f"{stem}_corpus.json"
-        self._mapping_path = directory / f"{stem}_mapping.json"
-        self._lock = threading.Lock()
-        self.encoder = self._load_encoder()
-
-    # -- public
-
-    def add(self, texts: List[str], source: str) -> None:
-        with self._lock:
-            corpus = self._read(self._corpus_path, [])
-            mapping = self._read(self._mapping_path, {})
-            start = len(corpus)
-            corpus.extend(texts)
-            mapping.update({str(start + i): source for i in range(len(texts))})
-            self._save(corpus, mapping)
-            self._refit(corpus)
-
-    def remove_source(self, source: str) -> None:
-        with self._lock:
-            if not self._mapping_path.exists():
-                return
-            corpus = self._read(self._corpus_path, [])
-            mapping = self._read(self._mapping_path, {})
-
-            kept = [
-                (text, mapping.get(str(i)))
-                for i, text in enumerate(corpus)
-                if mapping.get(str(i)) != source
-            ]
-            if not kept:
-                self._clear_unlocked()
-                return
-            self._save(
-                [t for t, _ in kept],
-                {str(i): s for i, (_, s) in enumerate(kept)},
-            )
-            self._refit([t for t, _ in kept])
-
-    def clear(self) -> None:
-        with self._lock:
-            self._clear_unlocked()
-
-    # -- internals
-
-    def _load_encoder(self) -> BM25Encoder:
-        encoder = BM25Encoder().default()
-        if self._state_path.exists():
-            try:
-                return encoder.load(str(self._state_path))
-            except Exception as e:
-                logger.warning("Failed to load BM25 encoder state: %s", e)
-        return encoder
-
-    @staticmethod
-    def _read(path: Path, default):
-        if not path.exists():
-            return default
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return default
-
-    def _save(self, corpus: List[str], mapping: Dict[str, str]) -> None:
-        self._corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
-        self._mapping_path.write_text(json.dumps(mapping), encoding="utf-8")
-
-    def _refit(self, corpus: List[str]) -> None:
-        try:
-            encoder = BM25Encoder().default()
-            encoder.fit(corpus)
-            encoder.dump(str(self._state_path))
-            self.encoder = encoder
-        except Exception as e:
-            logger.error("Failed to update BM25 encoder: %s", e)
-
-    def _clear_unlocked(self) -> None:
-        for path in (self._state_path, self._corpus_path, self._mapping_path):
-            path.unlink(missing_ok=True)
-        self.encoder = BM25Encoder().default()
 
 
 # --------------------------------------------------- chunk preparation
@@ -169,8 +94,20 @@ def _safe_metadata(raw: Dict) -> Dict:
     return out
 
 
-def _build_metadata(i: int, s3_key: Optional[str], fields: Dict, raw: Dict, file_name: Optional[str] = None) -> Dict:
-    base = {"doc_id": f"doc_{i}", "s3_key": s3_key or "user_upload"}
+def _build_metadata(
+    i: int,
+    s3_key: Optional[str],
+    fields: Dict,
+    raw: Dict,
+    file_name: Optional[str] = None,
+    folder_id: Optional[str] = None,
+) -> Dict:
+    # folder_id lives in `base` so it survives the oversized-metadata fallback below.
+    base = {
+        "doc_id": f"doc_{i}",
+        "s3_key": s3_key or "user_upload",
+        "folder_id": folder_key(folder_id),
+    }
     if file_name:
         base["file_name"] = file_name
     metadata = {
@@ -189,6 +126,7 @@ def normalize_for_index(
     metadatas: Optional[List[Dict]] = None,
     s3_key: Optional[str] = None,
     file_name: Optional[str] = None,
+    folder_id: Optional[str] = None,
 ) -> Tuple[List[str], List[Dict]]:
     """Filter noise and build clean (texts, metadatas) ready for indexing."""
     texts, cleaned = [], []
@@ -198,7 +136,7 @@ def normalize_for_index(
         if not content or _is_noise(content):
             continue
         texts.append(content)
-        cleaned.append(_build_metadata(i, s3_key, fields, raw, file_name))
+        cleaned.append(_build_metadata(i, s3_key, fields, raw, file_name, folder_id))
     return texts, cleaned
 
 
@@ -223,12 +161,9 @@ class VectorSearchManager:
         )
 
         self.hybrid_enabled = self.config.hybrid_requested and self.metric == "dotproduct"
-        self.bm25: Optional[Bm25Store] = None
-        self.retriever: Optional[PineconeHybridSearchRetriever] = None
-        if self.hybrid_enabled:
-            self.bm25 = Bm25Store(self.config.bm25_dir, namespace)
-            self._refresh_retriever()
-        else:
+        # BM25 statistics live in S3 + Firestore and are shared by every instance.
+        self.bm25: Optional[Bm25Store] = Bm25Store(namespace) if self.hybrid_enabled else None
+        if not self.hybrid_enabled:
             logger.info("Hybrid search disabled. Using dense embeddings.")
 
     @property
@@ -257,36 +192,42 @@ class VectorSearchManager:
             logger.warning("Could not read Pinecone index metric: %s", e)
             return ""
 
-    def _refresh_retriever(self) -> None:
-        """(Re)build the hybrid retriever so it picks up the latest BM25 encoder."""
+    def _hybrid_retriever(self, encoder: BM25Encoder, k: Optional[int] = None) -> PineconeHybridSearchRetriever:
+        """A hybrid retriever using the given (current) BM25 encoder."""
+        retriever = PineconeHybridSearchRetriever(
+            embeddings=self.embeddings,
+            sparse_encoder=encoder,
+            index=self.index,
+            alpha=self.config.hybrid_alpha,
+            namespace=self.namespace,
+            text_key="text",
+        )
+        return retriever if k is None else retriever.model_copy(update={"top_k": k})
+
+    def _current_encoder(self) -> Optional[BM25Encoder]:
+        """The namespace's BM25 encoder; None means use dense search."""
         if not self.bm25:
-            return
+            return None
         try:
-            self.retriever = PineconeHybridSearchRetriever(
-                embeddings=self.embeddings,
-                sparse_encoder=self.bm25.encoder,
-                index=self.index,
-                alpha=self.config.hybrid_alpha,
-                namespace=self.namespace,
-                text_key="text",
-            )
+            return self.bm25.encoder
         except Exception as e:
-            logger.warning("Hybrid retriever initialization failed: %s", e)
-            self.retriever = None
+            logger.warning("BM25 state unavailable for %s, using dense search: %s", self.namespace, e)
+            return None
 
     # -- search
 
-    def search(self, query: str, k: Optional[int] = None) -> List[Any]:
-        """Hybrid search if available, otherwise dense. `k` defaults per mode."""
+    def search(self, query: str, folder_id: Optional[str], k: Optional[int] = None) -> List[Any]:
+        """Search one folder of this namespace: hybrid if available, otherwise dense.
+
+        `folder_id` is required (None means the root folder) so a search can never
+        return chunks from the user's other folders. `k` defaults per mode.
+        """
+        flt = folder_filter(folder_id)
         try:
-            if self.retriever:
-                retriever = (
-                    self.retriever
-                    if k is None
-                    else self.retriever.model_copy(update={"top_k": k})
-                )
-                return retriever.invoke(query)
-            return self.vector_store.similarity_search(query, k=k or DENSE_DEFAULT_K)
+            encoder = self._current_encoder()
+            if encoder:
+                return self._hybrid_retriever(encoder, k).invoke(query, filter=flt)
+            return self.vector_store.similarity_search(query, k=k or DENSE_DEFAULT_K, filter=flt)
         except Exception as e:
             logger.error("Search failed for query '%s': %s", query, e)
             return []
@@ -299,19 +240,20 @@ class VectorSearchManager:
         metadatas: Optional[List[Dict]] = None,
         s3_key: Optional[str] = None,
         file_name: Optional[str] = None,
+        folder_id: Optional[str] = None,
     ) -> bool:
         try:
-            texts, cleaned = normalize_for_index(documents, metadatas, s3_key, file_name)
+            texts, cleaned = normalize_for_index(documents, metadatas, s3_key, file_name, folder_id)
             if not texts:
                 logger.warning("No valid text chunks to index.")
                 return False
 
-            if self.bm25:
-                self.bm25.add(texts, s3_key or "unknown")
-                self._refresh_retriever()  # must see the refit encoder before upserting
+            # Count this PDF into the BM25 totals first, so its sparse vectors are
+            # encoded with statistics that include it.
+            encoder = self.bm25.add(texts, s3_key or "unknown") if self.bm25 else None
 
-            if self.retriever:
-                self.retriever.add_texts(texts=texts, metadatas=cleaned, namespace=self.namespace)
+            if encoder:
+                self._hybrid_retriever(encoder).add_texts(texts=texts, metadatas=cleaned, namespace=self.namespace)
             else:
                 self.vector_store.add_texts(texts=texts, metadatas=cleaned)
 
@@ -336,10 +278,22 @@ class VectorSearchManager:
             self.index.delete(filter={"s3_key": s3_key}, namespace=self.namespace)
             if self.bm25:
                 self.bm25.remove_source(s3_key)
-                self._refresh_retriever()
             return True
         except Exception as e:
             logger.error("Failed to delete documents for %s: %s", s3_key, e)
+            return False
+
+    def delete_documents_by_folder(self, folder_id: Optional[str]) -> bool:
+        """Delete every vector of one folder; the user's other folders are untouched.
+
+        BM25 counts are not touched here: they are subtracted per PDF in
+        delete_documents_by_s3_key, and a folder can only be deleted once empty.
+        """
+        try:
+            self.index.delete(filter=folder_filter(folder_id), namespace=self.namespace)
+            return True
+        except Exception as e:
+            logger.error("Failed to delete folder %s in %s: %s", folder_key(folder_id), self.namespace, e)
             return False
 
     def delete_namespace(self) -> bool:
@@ -347,7 +301,6 @@ class VectorSearchManager:
             self.index.delete(delete_all=True, namespace=self.namespace)
             if self.bm25:
                 self.bm25.clear()
-                self._refresh_retriever()
             return True
         except Exception as e:
             logger.error("Failed to delete namespace %s: %s", self.namespace, e)

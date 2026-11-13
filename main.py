@@ -2,7 +2,9 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv(override=True)
@@ -29,6 +31,19 @@ app.add_middleware(
 )
 
 logging.basicConfig(level=logging.INFO)
+
+
+@app.exception_handler(RequestValidationError)
+async def log_validation_error(request: Request, exc: RequestValidationError):
+    """Log which field made a request fail with 422. Values are left out so tokens never reach the log."""
+    problems = [
+        f"{'.'.join(str(part) for part in err.get('loc', ()))}: {err.get('msg')}"
+        for err in exc.errors()
+    ]
+    logging.getLogger(__name__).warning(
+        "422 on %s %s: %s", request.method, request.url.path, "; ".join(problems)
+    )
+    return await request_validation_exception_handler(request, exc)
 
 app.include_router(folders_router, prefix="/api")
 app.include_router(upload_router)

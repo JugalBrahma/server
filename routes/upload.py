@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from openai import OpenAI
 
 from agent.agent import RAGAgent
+from agent.vector_manager import folder_key, user_namespace
 from config.firebase import get_current_user_id, get_firestore
 from config.s3 import upload_file_to_s3
 from rag.ingestion import prepare_chunks
@@ -41,11 +42,6 @@ def temp_pdf(upload: UploadFile):
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def get_namespace(user_id: str, folder_id: str | None) -> str:
-    base = f"user_{user_id}"
-    return f"{base}_folder_{folder_id}" if folder_id else base
 
 
 def get_owner_ref(user_id: str, folder_id: str | None):
@@ -98,9 +94,12 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
             upload_to_s3(path, s3_key)
 
         chunks = prepare_chunks(elements, client=openai_client)
-        namespace = get_namespace(user_id, folder_id)
+        namespace = user_namespace(user_id)
 
-        if not RAGAgent(namespace=namespace).add_documents(chunks, s3_key=s3_key, file_name=file_name):
+        added = RAGAgent(namespace=namespace).add_documents(
+            chunks, s3_key=s3_key, file_name=file_name, folder_id=folder_id
+        )
+        if not added:
             raise HTTPException(502, "Vectorization failed")
 
         image_count = sum(1 for c in chunks if c.get("has_image"))
@@ -118,6 +117,7 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
             "vectorization": {
                 "success": True,
                 "namespace": namespace,
+                "folder_id": folder_key(folder_id),
                 "chunks_vectorized": len(chunks),
                 "vectorization_method": "pinecone",
             },

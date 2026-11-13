@@ -1,4 +1,26 @@
-from agent.vector_manager import normalize_for_index
+from agent.vector_manager import ROOT_FOLDER, folder_filter, normalize_for_index, user_namespace
+
+
+def test_every_chunk_records_its_folder():
+    _, metadatas = normalize_for_index(["a real sentence here"], folder_id="f1")
+    assert metadatas[0]["folder_id"] == "f1"
+
+
+def test_chunks_without_a_folder_go_to_root():
+    _, metadatas = normalize_for_index(["a real sentence here"])
+    assert metadatas[0]["folder_id"] == ROOT_FOLDER
+
+
+def test_folder_survives_oversized_metadata_fallback():
+    chunk = {"content": "a real sentence here", "metadata": {"languages": ["x" * 5000] * 10}}
+    _, metadatas = normalize_for_index([chunk], folder_id="f1")
+    assert metadatas[0]["folder_id"] == "f1"
+
+
+def test_filter_and_namespace():
+    assert folder_filter("f1") == {"folder_id": {"$eq": "f1"}}
+    assert folder_filter(None) == {"folder_id": {"$eq": ROOT_FOLDER}}
+    assert user_namespace("u1") == "user_u1"
 
 
 def test_drops_noise_and_keeps_text():

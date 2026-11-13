@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from agent.vector_manager import VectorSearchManager
+from agent.vector_manager import VectorSearchManager, user_namespace
 from config.firebase import get_current_user_id, get_firestore
 from config.s3 import BUCKET_NAME, s3
 
@@ -58,7 +58,8 @@ async def delete_pdf(
 
     # Delete vector embeddings from Pinecone
     try:
-        namespace = f"user_{user_id}_folder_{folder_id}" if folder_id else f"user_{user_id}"
+        # s3_key is unique per PDF, so deleting by it in the user's namespace is enough.
+        namespace = user_namespace(user_id)
         vector_manager = VectorSearchManager(index_name="askadocument", namespace=namespace)
         vector_manager.delete_documents_by_s3_key(s3_key)
         logger.info("Deleted vectors for s3_key %s in namespace %s", s3_key, namespace)

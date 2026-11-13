@@ -55,16 +55,16 @@ def str2bool(v):
         raise argparse.ArgumentTypeError("Boolean value expected, e.g. true or false.")
 
 
-def build_predict(rag_agent: RAGAgent, enable_reranker: bool = True):
+def build_predict(rag_agent: RAGAgent, enable_reranker: bool = True, folder_id: str | None = None):
     def predict(inputs: dict) -> dict:
         question = inputs.get("question", "")
-        result = rag_agent.query(user_input=question, enable_reranker=enable_reranker) # type: ignore
+        result = rag_agent.query(user_input=question, folder_id=folder_id, enable_reranker=enable_reranker) # type: ignore
 
         # Use the actual reranked contexts the agent retrieved
         contexts = result.get("contexts")
         if not contexts:
             top_k = rag_agent.deps.rerank_top_k if not enable_reranker else TOP_K
-            docs = rag_agent.deps.vector_manager.search(query=question, k=top_k)
+            docs = rag_agent.deps.vector_manager.search(query=question, folder_id=folder_id, k=top_k)
             contexts = [d.page_content for d in docs if getattr(d, "page_content", None)]
 
         return {
@@ -79,6 +79,7 @@ def run_experiment(
     namespace: str | None = DEFAULT_NAMESPACE,
     dataset_name: str = DATASET_NAME,
     enable_reranker: bool = True,
+    folder_id: str | None = None,
 ):
     if not namespace:
         raise ValueError("Provide a namespace via --namespace or EVAL_NAMESPACE")
@@ -97,7 +98,7 @@ def run_experiment(
     )
     rag_agent = RAGAgent(namespace=namespace, enable_reranker=enable_reranker)
     results = evaluate(
-        build_predict(rag_agent, enable_reranker=enable_reranker),
+        build_predict(rag_agent, enable_reranker=enable_reranker, folder_id=folder_id),
         data=dataset_name,
         evaluators=EVALUATORS,
         client=client,
@@ -113,6 +114,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate RAG pipeline on dataset")
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     parser.add_argument("--dataset", default=DATASET_NAME)
+    parser.add_argument("--folder-id", default=None, help="Folder to search; omit for the root folder")
     parser.add_argument(
         "--reranker",
         type=str2bool,
@@ -126,4 +128,5 @@ if __name__ == "__main__":
         namespace=args.namespace,
         dataset_name=args.dataset,
         enable_reranker=args.reranker,
+        folder_id=args.folder_id,
     )

@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from config.firebase import get_current_user_id, get_firestore
-from agent.vector_manager import VectorSearchManager
+from agent.vector_manager import VectorSearchManager, user_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +40,13 @@ async def delete_folder(
             msg.reference.delete()
         main_chat_ref.delete()
 
-        # Clean up vector search namespace
-        namespace = f"user_{user_id}_folder_{folder_id}"
+        # Remove any vectors left for this folder. Only this folder's vectors are
+        # deleted: the namespace is shared by all of the user's folders.
+        namespace = user_namespace(user_id)
         try:
-            VectorSearchManager(namespace=namespace).delete_namespace()
+            VectorSearchManager(namespace=namespace).delete_documents_by_folder(folder_id)
         except Exception as exc:
-            logger.warning("Failed to delete Pinecone namespace %s: %s", namespace, exc)
+            logger.warning("Failed to delete vectors of folder %s in %s: %s", folder_id, namespace, exc)
 
         folder_ref.delete()
         logger.info("Deleted folder %s for user %s", folder_id, user_id)

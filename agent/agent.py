@@ -1,7 +1,7 @@
 import os
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langsmith import traceable
@@ -35,8 +35,8 @@ class AgentDependencies:
         else:
             self.enable_reranker = os.getenv("ENABLE_RERANKER", "true").lower() == "true"
         self.reranker = DocumentReranker() if self.enable_reranker else None
-        self.fetch_k = int(os.getenv("RETRIEVAL_FETCH_K", "15"))
-        self.rerank_top_k = int(os.getenv("RERANK_TOP_K", "8"))
+        self.fetch_k = int(os.getenv("RETRIEVAL_FETCH_K", "20"))
+        self.rerank_top_k = int(os.getenv("RERANK_TOP_K", "5"))
 
 
 class RAGAgent:
@@ -67,6 +67,7 @@ class RAGAgent:
     def retrieve_documents(
         self,
         query: str,
+        folder_id: Optional[str] = None,
         enable_reranker: Optional[bool] = None,
     ) -> Tuple[str, List[Any], RerankResult, Dict[int, Dict[str, Any]]]:
         """
@@ -78,12 +79,15 @@ class RAGAgent:
         the LLM makes can be resolved to files and pages.
         """
         try:
-            logger.info("Retrieving chunks for query '%s' in namespace '%s'", query, self.namespace)
+            logger.info(
+                "Retrieving chunks for query '%s' in namespace '%s', folder '%s'",
+                query, self.namespace, folder_id or "root",
+            )
             reranker = self._active_reranker(enable_reranker)
 
-            # Step 1: Query vector database for top matching candidate chunks
+            # Step 1: Query this folder only for top matching candidate chunks
             fetch_k = self.deps.fetch_k if reranker else self.deps.rerank_top_k
-            results = self.deps.vector_manager.search(query=query, k=fetch_k)
+            results = self.deps.vector_manager.search(query=query, folder_id=folder_id, k=fetch_k)
             if not results:
                 return "", [], RerankResult([], applied=False, fallback_used=False), {}
 
@@ -164,11 +168,16 @@ class RAGAgent:
             "You are an intelligent document assistant. "
             "Answer the question based strictly on the retrieved document context below. "
             "Pay close attention to chronological and temporal qualifiers in questions (such as 'initially', 'first', 'before', 'later'). "
-            "Wrap only the exact facts, quotes, figures, and direct information from the documents in <doc> and </doc> tags. Use normal plain text for your own connecting words, and do not wrap entire sentences in <doc> tags. "
+            "Highlight key facts by wrapping them in <doc> and </doc> tags. Wrap only short exact phrases taken from the documents, "
+            "such as a name, number, date, place or brief quote of a few words. Never wrap a whole sentence or a whole clause; "
+            "most of each sentence must stay in plain text. "
+            "Example: 'The bridge opened in <doc>1932</doc> and cost <doc>$4.2 million</doc> [2].' "
             "Each passage is labeled with a numbered ID such as [1]. After each statement that uses a passage, cite its ID in square brackets, "
             "for example: 'He planted roses <doc>in his yard</doc> [2].' Cite several IDs as [1, 3]. Only cite IDs that appear in the context. "
             "Do not mention page numbers or file names yourself; sources are added to your answer automatically. "
-            "If the context does not contain the answer, politely state that the information was not found in the documents, without citing anything."
+            "If the context does not contain the answer, politely state that the information was not found in the documents, without citing anything. "
+            "Be concise: answer the question directly and stop. Do not add closing offers, follow-up questions or lines such as "
+            "'let me know if you meant something else'."
         )
         user_prompt = f'User Question: "{user_input}"\n\nRetrieved Documents:\n{retrieved_docs}\n\nAnswer:'
         return system_prompt, user_prompt
@@ -214,6 +223,7 @@ class RAGAgent:
         # Step 3: Retrieve and rerank relevant document chunks from Pinecone
         retrieved_docs, raw_chunks, rerank_result, chunk_refs = self.retrieve_documents(
             user_input,
+            folder_id=folder_id,
             enable_reranker=enable_reranker,
         )
 
@@ -241,8 +251,54 @@ class RAGAgent:
             },
         }
 
-    def add_documents(self, documents, metadatas=None, s3_key=None, file_name=None):
-        return self.deps.vector_manager.add_documents(documents, metadatas, s3_key, file_name)
+    @traceable(run_type="chain", name="RAG Agent Query")
+    def query_stream(
+        self,
+        user_input: str,
+        folder_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        enable_reranker: Optional[bool] = None,
+    ) -> Iterator[dict]:
+        """
+        Same steps as query(), but sends the answer in pieces while the LLM writes it.
+
+        Yields:
+            {"type": "token", "text": "..."}                     one piece of the answer
+            {"type": "done", "answer": "...", "sources": [...]}  the final, cleaned answer
+        """
+        self._attach_trace_metadata(folder_id, user_id)
+
+        # 1. Greetings get the fixed reply, with no search and no LLM call
+        is_greeting, greeting_reply = check_greeting_guardrail(user_input)
+        if is_greeting and greeting_reply:
+            yield {"type": "done", "answer": greeting_reply, "sources": []}
+            return
+
+        # 2. Find and rerank the passages (same as query())
+        retrieved_docs, _, _, chunk_refs = self.retrieve_documents(
+            user_input,
+            folder_id=folder_id,
+            enable_reranker=enable_reranker,
+        )
+        system_prompt, user_prompt = self._build_prompts(user_input, retrieved_docs)
+
+        # 3. Ask the LLM, passing each piece on as soon as it arrives
+        full_answer = ""
+        for piece in self.deps.llm.stream([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]):
+            text = piece.content if isinstance(piece.content, str) else ""
+            if text:
+                full_answer += text
+                yield {"type": "token", "text": text}
+
+        # 4. Turn the [1], [2] markers into sources (same as query())
+        answer, sources = resolve_citations(full_answer, chunk_refs)
+        yield {"type": "done", "answer": answer, "sources": sources}
+
+    def add_documents(self, documents, metadatas=None, s3_key=None, file_name=None, folder_id=None):
+        return self.deps.vector_manager.add_documents(documents, metadatas, s3_key, file_name, folder_id)
 
     def delete_documents(self, doc_ids: List[str]) -> bool:
         return self.deps.vector_manager.delete_documents(doc_ids)

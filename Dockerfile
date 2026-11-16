@@ -6,5 +6,7 @@ ENV RERANKER_MODEL=ms-marco-MiniLM-L-12-v2 \
     RERANKER_CACHE_DIR=/opt/flashrank \
     PORT=8000
 RUN python -c "import os; from flashrank import Ranker; Ranker(model_name=os.environ['RERANKER_MODEL'], cache_dir=os.environ['RERANKER_CACHE_DIR'])"
+# pinecone_text needs these NLTK files; bake them in so pods never download them at startup.
+RUN python -c "import nltk; [nltk.download(p, download_dir='/usr/local/share/nltk_data') for p in ('punkt_tab', 'stopwords')]"
 COPY . .
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT --loop asyncio"]

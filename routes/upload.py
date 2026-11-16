@@ -6,9 +6,10 @@ import uuid
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 
+import pymupdf
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from openai import OpenAI
-
+from redis import Redis
 from agent.agent import RAGAgent
 from agent.vector_manager import folder_key, user_namespace
 from config.firebase import get_current_user_id, get_firestore
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 db = get_firestore()
 openai_client = OpenAI()
-
 MAX_PAGES = 50
 EXTRACTION_METHOD = "rag_pipeline_s3_connected_with_images"
 
@@ -52,9 +52,10 @@ def get_owner_ref(user_id: str, folder_id: str | None):
     return user_ref
 
 
-def count_pages(elements) -> int:
-    pages = {e["page"] for e in elements if isinstance(e, dict) and "page" in e}
-    return len(pages) or 1
+def count_pages(path: str) -> int:
+    """Read the page count from the file itself, without extracting any content."""
+    with pymupdf.open(path) as doc:
+        return doc.page_count
 
 
 def upload_to_s3(path: str, key: str) -> None:
@@ -62,6 +63,25 @@ def upload_to_s3(path: str, key: str) -> None:
         result = upload_file_to_s3(file_obj=f, file_key=key)
     if not result.get("success"):
         raise HTTPException(500, result.get("error") or "S3 upload failed")
+
+# ---------- rate limiting ----------
+
+# Normal (sync) client, because upload_pdf is a plain def and can't await.
+rate_redis = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+
+
+def check_rate_limit(key: str, limit: int, window_seconds: int, message: str) -> None:
+    try:
+        count = rate_redis.incr(key)
+        if count == 1:
+            rate_redis.expire(key, window_seconds)
+        if count > limit:
+            ttl = rate_redis.ttl(key)
+            raise HTTPException(status_code=429, detail=f"{message} Try again in {ttl}s.")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Rate limiter unavailable, allowing request")
 
 
 # ---------- route ----------
@@ -72,6 +92,8 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
     user_id: str = Depends(get_current_user_id),
     folder_id: str | None = Header(None, convert_underscores=False),
 ):
+    check_rate_limit("ratelimit:upload:global", 20, 60, "Server is busy.")
+
     pdf_id = str(uuid.uuid4())
     s3_key = f"pdfs/{user_id}/{pdf_id}.pdf"
     file_name = file.filename
@@ -79,8 +101,11 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
 
     try:
         with temp_pdf(file) as path:
-            elements = extract_pdf_elements(path)
-            page_count = count_pages(elements)
+            
+            try:
+                page_count = count_pages(path)
+            except Exception:
+                return {"success": False, "error": "This file is not a valid PDF.", **base_response}
 
             if page_count > MAX_PAGES:
                 return {
@@ -91,6 +116,7 @@ def upload_pdf(  # plain def -> runs in threadpool, doesn't block the event loop
                     **base_response,
                 }
 
+            elements = extract_pdf_elements(path)
             upload_to_s3(path, s3_key)
 
         chunks = prepare_chunks(elements, client=openai_client)

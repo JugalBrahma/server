@@ -81,3 +81,6 @@ bm25_cache/
 *.md
 !README.md
 !**/README.md
+
+# Local Redis data
+*.rdb

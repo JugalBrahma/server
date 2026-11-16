@@ -1,15 +1,17 @@
 from typing import Optional
+
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from config.models import get_rag_llm
 
 
 class LLMManager:
-    """Manages LLM instances using the configured provider (OpenAI / Groq)"""
-    
+    """Creates the chat model used to answer questions (via OpenRouter)."""
+
     def __init__(
         self,
         model_name: Optional[str] = None,
         temperature: Optional[float] = None,
-        provider: Optional[str] = None,
     ):
         kwargs = {}
         if model_name:
@@ -17,10 +19,7 @@ class LLMManager:
         if temperature is not None:
             # pyrefly: ignore[unsupported-operation]
             kwargs["temperature"] = temperature
-        if provider:
-            kwargs["provider"] = provider
         self.llm = get_rag_llm(**kwargs)
 
-    
-    def get_llm(self):
+    def get_llm(self) -> BaseChatModel:
         return self.llm

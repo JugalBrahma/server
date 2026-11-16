@@ -9,8 +9,7 @@ load_dotenv()
 DEFAULT_OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL")
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
-DEFAULT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.7"))
-DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").lower()
+DEFAULT_TEMPERATURE = float(os.getenv("AGENT_TEMPERATURE", "0.3"))
 DEFAULT_RAGAS_EVAL_MODEL = os.getenv("RAGAS_EVAL_MODEL", "deepseek/deepseek-chat")
 
 
@@ -22,7 +21,7 @@ def get_openrouter_llm(
 ) -> BaseChatModel:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise ValueError("OPENROUTER_API_KEY environment variable is required for openrouter provider")
+        raise ValueError("OPENROUTER_API_KEY environment variable is required")
 
     return ChatOpenRouter(
         model=model,
@@ -34,8 +33,7 @@ def get_openrouter_llm(
 
 def get_rag_llm(
     model: str | None = None,
-    temperature: float = 0.3,
-    provider: str | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
     **kwargs,
 ) -> BaseChatModel:
     return get_openrouter_llm(
@@ -55,7 +53,7 @@ def get_openrouter_embeddings(
 ) -> OpenAIEmbeddings:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        raise ValueError("OPENROUTER_API_KEY environment variable is required for openrouter provider")
+        raise ValueError("OPENROUTER_API_KEY environment variable is required")
 
     selected_model = model or DEFAULT_EMBEDDING_MODEL
     selected_dim = dimensions or DEFAULT_EMBEDDING_DIM
@@ -72,10 +70,9 @@ def get_openrouter_embeddings(
 def get_embeddings(
     model: str | None = None,
     dimensions: int | None = None,
-    provider: str | None = None,
     **kwargs,
 ) -> OpenAIEmbeddings:
-    """Returns the configured embeddings instance (default: OpenRouter)."""
+    """Returns the embeddings model, served through OpenRouter."""
     return get_openrouter_embeddings(model=model, dimensions=dimensions, **kwargs)
 
 

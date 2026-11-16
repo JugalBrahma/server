@@ -26,3 +26,4 @@ tiktoken
 ragas
 # Reranking
 flashrank
+redis

@@ -1,0 +1,72 @@
+# The FastAPI server, built from the Dockerfile in the project root.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rag-api
+  template:
+    metadata:
+      labels:
+        app: rag-api
+    spec:
+      containers:
+        - name: rag-api
+          image: rag-api:latest
+          imagePullPolicy: Never # use the image built inside Minikube
+          ports:
+            - containerPort: 8000
+          # All keys from .env (OpenAI, Pinecone, AWS, LangSmith...).
+          # Create with: kubectl create secret generic rag-env --from-env-file=.env
+          envFrom:
+            - secretRef:
+                name: rag-env
+          # Values here override the same names in rag-env.
+          env:
+            - name: PORT
+              value: "8000"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+            - name: RERANKER_CACHE_DIR
+              value: "/opt/flashrank" # the model is already baked into the image here
+            - name: FIREBASE_ADMIN_SDK_PATH
+              value: "/secrets/firebase-adminsdk.json"
+          # Create with: kubectl create secret generic firebase-key --from-file=firebase-adminsdk.json
+          volumeMounts:
+            - name: firebase-key
+              mountPath: /secrets
+              readOnly: true
+          # Send traffic to a pod only once /health answers.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+      volumes:
+        - name: firebase-key
+          secret:
+            secretName: firebase-key
+---
+# Opens the API on port 80 of the VM (k3s ServiceLB) and spreads requests across both pods.
+# Needs k3s installed with --disable traefik, since Traefik also wants port 80.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-api
+spec:
+  type: LoadBalancer
+  selector:
+    app: rag-api
+  ports:
+    - port: 80
+      targetPort: 8000

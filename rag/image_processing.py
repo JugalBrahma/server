@@ -14,17 +14,11 @@ from pathlib import Path
 import pickle
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from PIL import Image
 
 logger = logging.getLogger(__name__)
-
-# Usage stats kept for backward compatibility
-usage_stats = {
-    "vision_input": 0,
-    "vision_output": 0,
-}
 
 VISION_MODEL = os.getenv("VISION_IMAGE_MODEL", "gpt-4o-mini")
 PHASH_DISTANCE_THRESHOLD = int(os.getenv("VISION_PHASH_THRESHOLD", "6"))
@@ -211,7 +205,6 @@ def deduplicate_images(image_chunks: List[Dict]) -> List[Dict]:
 
 def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10) -> List[Dict]:
     """Process multiple images in single API calls and parse responses."""
-    global usage_stats
     descriptions: List[Dict] = []
 
     for i in range(0, len(image_chunks), batch_size):
@@ -248,8 +241,6 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
 
             usage = getattr(response, "usage", None)
             if usage:
-                usage_stats["vision_input"] += usage.prompt_tokens
-                usage_stats["vision_output"] += usage.completion_tokens
                 logger.info(
                     "Batch %d tokens: %d in / %d out",
                     batch_num,
@@ -291,7 +282,6 @@ def describe_images_batch(image_chunks: List[Dict], client, batch_size: int = 10
 
 def describe_single_image(img_chunk: Dict, client, index: int) -> Optional[Dict]:
     """Fallback handler to describe an individual image."""
-    global usage_stats
     try:
         prompt = _build_prompt_for_image(img_chunk, index)
         user_content = [
@@ -310,10 +300,6 @@ def describe_single_image(img_chunk: Dict, client, index: int) -> Optional[Dict]
             client,
             messages=[{"role": "user", "content": user_content}],
         )
-        usage = getattr(response, "usage", None)
-        if usage:
-            usage_stats["vision_input"] += usage.prompt_tokens
-            usage_stats["vision_output"] += usage.completion_tokens
 
         response_text = response.choices[0].message.content.strip()
         return {

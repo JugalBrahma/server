@@ -166,10 +166,6 @@ class VectorSearchManager:
         if not self.hybrid_enabled:
             logger.info("Hybrid search disabled. Using dense embeddings.")
 
-    @property
-    def bm25_encoder(self) -> Optional[BM25Encoder]:  # backwards-compatible accessor
-        return self.bm25.encoder if self.bm25 else None
-
     # -- setup
 
     def _ensure_index(self) -> None:

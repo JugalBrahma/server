@@ -2,16 +2,19 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
+from redis.asyncio import Redis
 
 load_dotenv(override=True)
 
 # Configure tracing after loading the environment and before loading the routes.
 import config.langsmith  # noqa: E402
 
+import routes.chat as chat
 from routes.analytics import router as analytics_router
 from routes.chat import router as chat_router
 from routes.debug_pdf import router as debug_pdf_router
@@ -67,11 +70,23 @@ def warm_reranker() -> None:
         # Keep the API available; each answer exposes a reranker fallback if it occurs.
         logging.getLogger(__name__).exception("FlashRank warm-up failed")
 
+@app.on_event("startup")
+async def startup_event():
+    chat.redis = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+    chat.http_client = httpx.AsyncClient()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if chat.redis is not None:
+        await chat.redis.aclose()
+    if chat.http_client is not None:
+        await chat.http_client.aclose()
+
 
 @app.get("/")
 async def root():
     return {"message": "RAG Backend API is running"}
-
 
 @app.get("/health")
 async def health():

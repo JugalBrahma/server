@@ -207,4 +207,5 @@ The client is a responsive, cross-platform **Flutter** application (mobile and d
 
 ## About me
 
-Developer building agentic AI and full-stack software systems. Background in Flutter engineering and modern AI backend architectures, shipping end-to-end applications from polished UI to scalable vector retrieval pipelines.
+Flutter developer building agentic AI applications. I focus on cross-platform UI, AI agents and RAG pipelines, and on measuring answer quality with automated evaluation (Ragas, LangSmith).
+

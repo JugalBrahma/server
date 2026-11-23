@@ -15,6 +15,7 @@ Standard vector search frequently retrieves text passages that share keywords wi
 ## What it does
 
 - **Multimodal Document Parsing**: Extracts text chunks and embedded visual elements (figures, diagrams, tables) directly from source PDFs in AWS S3.
+- **Hybrid Search**: Uses BM25 for hybrid keyword and vector search.
 - **Two-Stage Re-ranking**: Retrieves top candidates from Pinecone and re-scores them locally with FlashRank to guarantee top-ranked relevance.
 - **Citation-Backed Generation**: Every claim cites its exact source document and page number.
 - **Multimodal Inline Figures**: Displays referenced diagrams, charts, and tables alongside conversational responses.
@@ -41,7 +42,7 @@ Evaluated on **7 benchmark question-answer pairs** built from **A Country Doctor
 
 | Stage | Typical / p50 | p95 |
 |---|---|---|
-| Pinecone Hybrid / Dense Retrieval | 1.69 s | 1.73 s |
+| Hybrid Retrieval | 1.69 s | 1.73 s |
 | FlashRank Local Rerank & Context Assembly | 0.85 s | 0.96 s |
 | Generation & Reasoning (LLM) | 4.36 s | 6.01 s |
 | **End to End Pipeline** | **10.22 s** | **19.27 s** |
@@ -176,7 +177,6 @@ kubectl apply -f k8s/
 
 ## Roadmap
 
-- [ ] Hybrid search integration (sparse BM25 + dense vector fusion).
 - [ ] Real-time token streaming with progressive inline citations.
 - [ ] Agentic query re-writing and sub-query decomposition for complex multi-part questions.
 - [ ] Visual bounding box highlight rendering directly on the Flutter PDF viewer.
@@ -189,7 +189,7 @@ kubectl apply -f k8s/
 
 ## Tech stack
 
-FastAPI · LangChain · Pinecone · FlashRank · PyMuPDF · AWS S3 · Firebase (Auth & Firestore) · Redis · Ragas · LangSmith · Flutter
+FastAPI · LangChain · Pinecone · BM25 · FlashRank · PyMuPDF · AWS S3 · Firebase (Auth & Firestore) · Redis · Ragas · LangSmith · Flutter
 
 **Deployment:** Docker · Kubernetes (Minikube) · GCP Compute Engine · Prometheus · Grafana · Grafana Cloud (Alloy)
 

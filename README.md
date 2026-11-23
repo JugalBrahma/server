@@ -4,7 +4,7 @@
 
 **Faithfulness 0.95 · Context precision 0.61 · Correctness 0.91 · p50 latency 10.2s · ~$0.003 per query**
 
-[Architecture](#architecture) · [Results](#results) · [Key design decisions](#key-design-decisions) · [Evaluation method](#evaluation-method) · [Tech stack](#tech-stack)
+[Architecture](#architecture) · [Results](#results) · [Key design decisions](#key-design-decisions) · [Deployment](#deployment) · [Evaluation method](#evaluation-method) · [Tech stack](#tech-stack)
 
 ---
 
@@ -20,6 +20,7 @@ Standard vector search frequently retrieves text passages that share keywords wi
 - **Multimodal Inline Figures**: Displays referenced diagrams, charts, and tables alongside conversational responses.
 - **Multi-Tenant Isolation**: Enforces per-user and per-folder namespace partitioning in Pinecone and hierarchical data isolation in Cloud Firestore with Firebase Authentication.
 - **Automated Observability & Evaluation**: Telemetry, latency, token consumption, and Ragas quality metrics tracked via LangSmith.
+- **Shared Cache & Rate Limiting**: Redis caches repeated answers and enforces an upload rate limit across all API replicas.
 
 ---
 
@@ -111,6 +112,48 @@ flowchart TD
 
 ---
 
+## Deployment
+
+The backend runs as containers on single-node Kubernetes (Minikube) on a **Google Cloud Compute Engine** VM, with metrics sent to both a self-hosted Grafana and **Grafana Cloud**.
+
+```mermaid
+flowchart LR
+    App[Flutter App] -->|HTTP| Port[VM port 8080]
+    subgraph GCP[GCP Compute Engine VM]
+        Port --> API[rag-api Service]
+        subgraph K8s[Minikube]
+            API --> Pod1[rag-api pod]
+            API --> Pod2[rag-api pod]
+            Pod1 --> Redis[(Redis)]
+            Pod2 --> Redis
+            Prom[Prometheus + Grafana]
+            Alloy[Grafana Alloy]
+        end
+    end
+    Alloy --> Cloud[Grafana Cloud]
+```
+
+| Layer | Choice | Details |
+|---|---|---|
+| **Container** | Docker (`python:3.11-slim`) | FlashRank model and NLTK data are baked in at build time, so pods start without downloads. `.dockerignore` keeps `.env` and keys out of the image. |
+| **Orchestration** | Kubernetes (Minikube) | [`k8s/api.yaml`](k8s/api.yaml): 2 API replicas, readiness probe on `/health`, 1 GiB memory request and 2 GiB limit. [`k8s/redis.yaml`](k8s/redis.yaml): 1 Redis replica, 256 MB LRU cache. |
+| **Secrets** | Kubernetes Secrets | `.env` becomes the `rag-env` secret. The Firebase key is mounted read-only at `/secrets`. Neither is committed to git or included in the image. |
+| **Host** | GCP Compute Engine `e2-standard-4` (4 vCPU, 16 GB), Ubuntu 24.04 | Billed per hour and stopped when idle. |
+| **Monitoring** | `kube-prometheus-stack` (self-hosted) and Grafana Cloud Kubernetes Monitoring (Alloy) | Per-pod CPU and memory, restarts and cluster events. The two stacks share one Node Exporter to avoid a port 9100 conflict. |
+
+In testing with chat and PDF upload traffic, each API pod used about 250–550 MiB of memory (p95), well under its 2 GiB limit.
+
+**Deploy to a cluster:**
+
+```bash
+minikube image build -t rag-api:latest .
+kubectl create secret generic rag-env --from-env-file=.env
+kubectl create secret generic firebase-key --from-file=firebase-adminsdk.json
+kubectl apply -f k8s/
+```
+
+---
+
 ## Evaluation method
 
 - **Benchmark Dataset:** 7 domain question-answer pairs (`evaluate/datasets_data.py`) constructed from *A Country Doctor* targeting specific factual constraints (locations, actions, physical descriptions, character reactions).
@@ -137,12 +180,18 @@ flowchart TD
 - [ ] Real-time token streaming with progressive inline citations.
 - [ ] Agentic query re-writing and sub-query decomposition for complex multi-part questions.
 - [ ] Visual bounding box highlight rendering directly on the Flutter PDF viewer.
+- [ ] Production ingress: static IP, domain and HTTPS in place of the current port-forward on port 8080.
+- [ ] Move from Minikube to k3s or GKE so traffic is load-balanced across both API pods.
+- [ ] CI/CD with GitHub Actions: build and roll out automatically on every push.
+- [ ] Application metrics per endpoint (request rate, latency, errors) in Grafana.
 
 ---
 
 ## Tech stack
 
-FastAPI · LangChain · Pinecone · FlashRank · PyMuPDF · AWS S3 · Firebase (Auth & Firestore) · Ragas · LangSmith · Flutter
+FastAPI · LangChain · Pinecone · FlashRank · PyMuPDF · AWS S3 · Firebase (Auth & Firestore) · Redis · Ragas · LangSmith · Flutter
+
+**Deployment:** Docker · Kubernetes (Minikube) · GCP Compute Engine · Prometheus · Grafana · Grafana Cloud (Alloy)
 
 ---
 
